@@ -22,7 +22,7 @@ const SORT_OPTS = [
 const PAGE_SIZE = 25;
 const DEFAULT_F = { q: '', status: '', platform: '', dataType: '', awaiting: false, overdue: false, blocked: false, sort: 'lastContactAt', dir: 'desc', page: 1 };
 
-let alive = false, meta = { statuses: [], dataTypes: [], platforms: [] }, tz = 'Asia/Jakarta', period = 'day', me = { name: '', role: '' }, labels = {};
+let alive = false, meta = { statuses: [], dataTypes: [], hotStages: [], platforms: [] }, tz = 'Asia/Jakarta', period = 'day', me = { name: '', role: '' }, labels = {};
 let data = { leads: [], total: 0, page: 1, pageSize: PAGE_SIZE };
 let listTimer = null, statsTimer = null, searchTimer = null, listSeq = 0, statsSeq = 0, lastKey = '', lastStatsKey = '';
 const f = { ...DEFAULT_F };
@@ -51,7 +51,7 @@ export async function mount(el) {
   alive = true;
   Object.assign(f, DEFAULT_F);
   period = 'day'; lastKey = ''; lastStatsKey = ''; tz = 'Asia/Jakarta';
-  meta = { statuses: [], dataTypes: [], platforms: [] };
+  meta = { statuses: [], dataTypes: [], hotStages: [], platforms: [] };
   data = { leads: [], total: 0, page: 1, pageSize: PAGE_SIZE };
   try { labels = Object.fromEntries((await api('/api/settings')).requiredFields.map((x) => [x.id, x.label])); } catch { /* abaikan */ }
   try {
@@ -64,9 +64,9 @@ export async function mount(el) {
   <section class="space-y-6" aria-label="Statistik lead">
     <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-4 border-b border-gray-200 pb-4">
       <div><h2 class="text-2xl font-bold tracking-tight">Dashboard Laporan Analytics</h2><p class="text-sm text-gray-500">Ringkasan lead otomatis dari percakapan WhatsApp</p><p id="range" class="text-xs text-gray-400 mt-1"></p></div>
-      <div id="period" class="flex bg-white border border-gray-300 rounded-lg p-1 text-sm shadow-sm" role="group" aria-label="Periode statistik">
+      <div id="period" class="grid grid-cols-2 sm:flex bg-white border border-gray-300 rounded-lg p-1 text-sm shadow-sm" role="group" aria-label="Periode statistik">
         ${Object.entries({ day: 'Harian (Hari Ini)', week: 'Mingguan (7 Hari)', month: 'Bulanan (Bulan Ini)', year: 'Tahunan (Tahun Ini)' })
-          .map(([k, v]) => `<button type="button" data-p="${k}" aria-pressed="${k === 'day'}" class="px-3 py-1.5 rounded-md ${k === 'day' ? 'bg-gray-100 font-medium' : 'text-gray-600 hover:text-gray-900'}">${v}</button>`).join('')}
+          .map(([k, v]) => `<button type="button" data-p="${k}" aria-pressed="${k === 'day'}" class="px-3 py-1.5 rounded-md text-center ${k === 'day' ? 'bg-gray-100 font-medium' : 'text-gray-600 hover:text-gray-900'}">${v}</button>`).join('')}
       </div>
     </div>
     <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
@@ -193,7 +193,7 @@ async function loadList() {
     if (!alive || seq !== listSeq) return;
     tz = d.tz || tz;
     f.page = d.page;
-    meta = { statuses: d.statuses, dataTypes: d.dataTypes, platforms: d.platforms };
+    meta = { statuses: d.statuses, dataTypes: d.dataTypes, hotStages: d.hotStages || [], platforms: d.platforms };
     fillSelect('#f-source', d.platforms, f.platform);
     fillSelect('#f-status', d.statuses, f.status);
     fillSelect('#f-data', d.dataTypes, f.dataType);
@@ -291,10 +291,28 @@ function nameCell(l) {
     ${hotCand(l) ? `<button type="button" data-act="confirm-hot" data-id="${esc(l.id)}" aria-label="Konfirmasi ${esc(label(l))} sebagai Hot" class="mt-1 text-xs font-medium text-red-700 underline hover:text-red-900">Konfirmasi Hot</button>` : ''}`;
 }
 
+const STAGE_CLS = {
+  'Follow Up': 'bg-amber-100 text-amber-800',
+  'Negosiasi / Kirim Rekening': 'bg-purple-100 text-purple-800',
+  'Won': 'bg-emerald-100 text-emerald-800 font-bold',
+  'Lost': 'bg-gray-200 text-gray-700',
+};
+
 function statusCell(l) {
   const tip = [l.statusReason, l.warmScore > 0 ? `Skor warm: ${l.warmScore}` : '', ...(l.warmReasons || [])].filter(Boolean).join(' | ');
-  return `<span ${tip ? `title="${esc(tip)}"` : ''} class="px-2.5 py-1 rounded-full text-xs font-medium ${ST[l.status] || ''}">${esc(l.status)}</span>${l.statusManual ? '<div class="text-[10px] text-gray-400 mt-1">manual</div>' : ''}`;
+  let extra = '';
+  if (l.status === 'Hot Leads') {
+    const stg = l.hotStage || 'Follow Up';
+    extra += `<div class="mt-1">${pill(stg, STAGE_CLS[stg] || 'bg-red-100 text-red-800')}</div>`;
+    if (l.acesioStatus === 'sent') {
+      extra += `<div class="mt-0.5"><span class="inline-flex items-center text-[10px] text-emerald-700 font-medium">✓ Dikirim ke Acesio</span></div>`;
+    } else if (l.acesioStatus === 'failed') {
+      extra += `<div class="mt-0.5"><span class="inline-flex items-center text-[10px] text-red-700 font-medium">Gagal kirim ke Acesio</span></div>`;
+    }
+  }
+  return `<span ${tip ? `title="${esc(tip)}"` : ''} class="px-2.5 py-1 rounded-full text-xs font-medium ${ST[l.status] || ''}">${esc(l.status)}</span>${extra}${l.statusManual ? '<div class="text-[10px] text-gray-400 mt-1">manual</div>' : ''}`;
 }
+
 const dataCell = (l) => `<span title="${esc(l.dataReason || '')}" class="px-2.5 py-1 rounded-full text-xs font-medium ${DT[l.dataType] || ''}">${esc(l.dataType)}</span>${l.dataTypeManual ? '<div class="text-[10px] text-gray-400 mt-1">manual</div>' : ''}`;
 const contactCell = (l) => `${esc(fmtDT(l.lastContactAt))}<div class="text-[11px] text-gray-400">Masuk ${esc(fmtDT(l.createdAt))}</div>`;
 const followCell = (l) => (l.followUpDate
@@ -379,6 +397,7 @@ async function openEdit(id, trigger) {
   const platforms = [...new Set([...meta.platforms, l.platform].filter(Boolean))];
   const statuses = meta.statuses.length ? meta.statuses : ['Cold Leads', 'Warm Leads', 'Hot Leads'];
   const dataTypes = meta.dataTypes.length ? meta.dataTypes : ['New', 'Existing'];
+  const hotStages = meta.hotStages && meta.hotStages.length ? meta.hotStages : ['Follow Up', 'Negosiasi / Kirim Rekening', 'Won', 'Lost'];
   const act = (a, text, cls = BTN_LIGHT) => `<button type="button" data-a="${a}" class="${cls}">${text}</button>`;
   const h3 = 'font-medium text-gray-700 text-sm mb-1';
 
@@ -390,6 +409,19 @@ async function openEdit(id, trigger) {
     ${field('Sumber', sel('platform', platforms, l.platform))}
     ${field('Keyword Matched', `<input name="keyword" maxlength="200" class="${INP}" value="${esc(l.keyword)}">`)}
     ${field('Status Lead', sel('status', statuses, l.status), 'Otomatis: Cold saat pesan masuk pertama kali, Warm saat percakapan lebih dari 10 pesan, Hot saat ada transaksi/booking/transfer. Jika diubah manual, status ini dikunci.')}
+    ${l.status === 'Hot Leads' ? field('Tahap Follow-Up Hot Lead', sel('hotStage', hotStages, l.hotStage || 'Follow Up'), 'Tingkatan verifikasi follow-up. Jika mencapai tahap Won, data dapat dikirim ke Acesio Dashboard.') : ''}
+    ${l.status === 'Hot Leads' && (l.hotStage === 'Won' || l.acesioStatus === 'sent') ? `
+    <div class="bg-emerald-50 border border-emerald-200 rounded-lg p-3 space-y-2">
+      <div class="flex items-center justify-between gap-3">
+        <div>
+          <p class="text-sm font-bold text-emerald-900">Lead Berstatus WON</p>
+          <p class="text-xs text-emerald-700">Kirim data calon customer ini ke Acesio Dashboard.</p>
+        </div>
+        ${act('send-acesio', l.acesioStatus === 'sent' ? 'Kirim Ulang ke Acesio' : 'Kirim Data ke Acesio', BTN + ' bg-emerald-600 text-white hover:bg-emerald-700')}
+      </div>
+      ${l.acesioStatus === 'sent' ? `<p class="text-xs text-emerald-800 font-medium">✓ Sudah dikirim pada ${fmtDT(l.acesioSentAt)} (Menunggu persetujuan admin Acesio)</p>` : ''}
+      ${l.acesioLastError ? `<p class="text-xs text-red-700">Percobaan terakhir ke Acesio gagal: ${esc(l.acesioLastError)}</p>` : ''}
+    </div>` : ''}
     ${field('Data Leads', sel('dataType', dataTypes, l.dataType), 'Otomatis: New pada pesan masuk pertama kali; Existing bila customer yang pernah booking/transfer melakukannya untuk kedua kalinya (permanen). Jika diubah manual, dikunci.')}
     ${l.statusManual || l.dataTypeManual ? '<label class="flex items-center gap-2 text-sm"><input type="checkbox" name="resetAuto" value="1"> Kembalikan Status Lead &amp; Data Leads ke otomatis</label>' : ''}
 
@@ -420,6 +452,7 @@ async function openEdit(id, trigger) {
   async (form) => {
     const fd = Object.fromEntries(new FormData(form));
     const body = { name: fd.name, keyword: fd.keyword, platform: fd.platform, status: fd.status, dataType: fd.dataType };
+    if (fd.hotStage) body.hotStage = fd.hotStage;
     if (fd.resetAuto) body.resetAuto = true;
     await send('/api/leads/' + encodeURIComponent(id), body, 'PATCH');
     const date = $('#fu-date').value || null, note = $('#fu-note').value.trim();
@@ -467,6 +500,19 @@ async function openEdit(id, trigger) {
       if (a === 'note-del') {
         await send(`${base}/notes/${encodeURIComponent(b.dataset.nid)}`, {}, 'DELETE');
         notes.splice(notes.findIndex((n) => n.id === b.dataset.nid), 1); renderNotes(); lastKey = ''; loadList();
+        return;
+      }
+      if (a === 'send-acesio') {
+        b.disabled = true;
+        try {
+          const res = await send(`${base}/send-to-acesio`, {});
+          toast(res.message || 'Data customer berhasil dikirim ke Acesio!');
+          closeModal();
+          refreshAll();
+        } catch (err) {
+          toast(err.message, true);
+          b.disabled = false;
+        }
         return;
       }
       if (a === 'confirm-hot') { await send(base, { confirmHot: true }, 'PATCH'); toast('Lead dikonfirmasi sebagai Hot'); }

@@ -223,7 +223,10 @@ export async function handle(req, res, url, ctx) {
     if (p === '/api/v1/messages') return await sendMessage(ctx, body);
     return postEvent(ctx, body);
   };
-  const r = await connect.withIdempotency(ctx.app.id, idemKey, run);
+  const r = await connect.withIdempotency(ctx.app.id, idemKey, run, {
+    endpoint: `${m} ${cm ? '/api/v1/contacts/:phone' : p}`,
+    fingerprint: connect.requestFingerprint(m, p, body),
+  });
   if (r.replay) res.setHeader('Idempotent-Replay', 'true');
   return send(r);
 }

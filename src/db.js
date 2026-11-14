@@ -118,6 +118,15 @@ CREATE TABLE IF NOT EXISTS conversations (k TEXT PRIMARY KEY, last_message_at IN
 CREATE TABLE IF NOT EXISTS messages (ck TEXT NOT NULL, id TEXT NOT NULL, seq INTEGER NOT NULL, ts INTEGER, blob TEXT NOT NULL, PRIMARY KEY (ck, id));
 CREATE INDEX IF NOT EXISTS messages_seq ON messages (seq);
 CREATE TABLE IF NOT EXISTS seen_messages (k TEXT PRIMARY KEY, ts INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS idempotency_keys (
+  k TEXT PRIMARY KEY,              -- sha256(app_id, endpoint, Idempotency-Key): kunci klien mentah tidak disimpan
+  app_id TEXT NOT NULL, endpoint TEXT NOT NULL,
+  fp TEXT,                         -- sidik jari permintaan (metode, path, body) untuk mendeteksi kunci yang sama dengan isi berbeda
+  state TEXT NOT NULL,             -- 'pending' | 'done'
+  status INTEGER, body TEXT,       -- respons yang disimpan (terenkripsi bila DATA_KEY aktif)
+  created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idempotency_expires ON idempotency_keys (expires_at);
 `;
 
 function open() {
@@ -215,6 +224,9 @@ function setupEncryption() {
     }
     for (const r of db.prepare('SELECT k FROM seen_messages').all()) {
       if (!r.k.startsWith('h:')) db.prepare('UPDATE seen_messages SET k=? WHERE k=?').run(rowKey(r.k), r.k);
+    }
+    for (const r of db.prepare('SELECT k, body FROM idempotency_keys WHERE body IS NOT NULL').all()) {
+      if (!r.body.startsWith('e1:')) db.prepare('UPDATE idempotency_keys SET body=? WHERE k=?').run(encrypt(r.body), r.k);
     }
     setMeta('canary', encodeBlob({ ok: true }));
     setMeta('enc', '1');

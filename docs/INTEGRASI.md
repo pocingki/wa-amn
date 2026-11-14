@@ -82,7 +82,15 @@ Kirim teks WhatsApp transaksional.
 - Mode uji: `CONNECT_DRY_RUN=1` mencatat pesan tanpa mengirim (`dryRun:true`) untuk pengembangan dan CI.
 
 ### Idempotensi
-`POST /api/v1/messages` dan `POST /api/v1/events` menolak permintaan tanpa header `Idempotency-Key` (8-120 karakter). `PUT` kontak menerima kunci yang sama, tetapi tidak mewajibkannya. Permintaan ulang dengan kunci yang sama dari aplikasi yang sama dalam 24 jam mengembalikan respons semula dengan header `Idempotent-Replay: true` dan **tidak mengulang efek** (pesan tidak terkirim dua kali). Reservasi kunci ditulis ke disk sebelum efek dijalankan. Proses yang mati di tengah membalas `409 IN_PROGRESS` pada ulang kunci yang sama, bukan mengirim pesan kedua.
+`POST /api/v1/messages` dan `POST /api/v1/events` **wajib** memakai header `Idempotency-Key`. `PUT /api/v1/contacts/{nomor}` menerima kunci yang sama tetapi tidak mewajibkannya (PUT sudah idempoten secara alami).
+
+- **Format kunci:** 8-120 karakter dari `A-Z a-z 0-9 . _ : + = ~ -` (UUID, ULID, hex, `booking:123:confirm` semuanya valid). Kosong, terlalu pendek/panjang, atau berisi spasi dan karakter lain dijawab `400`. Kunci juga boleh dikirim di body (`idempotencyKey`); bila header dan body berbeda, `400`.
+- **Ruang kunci:** (kunci API, endpoint, Idempotency-Key). Aplikasi lain atau endpoint lain tidak pernah berbagi kunci. Kunci mentah tidak disimpan, hanya hash SHA-256.
+- **Duplikat:** permintaan ulang dengan kunci dan isi yang sama dalam **24 jam sejak dibuat** mengembalikan respons semula dengan header `Idempotent-Replay: true` dan tidak mengulang efek. Permintaan identik yang tiba bersamaan hanya dieksekusi sekali; yang lain menerima hasil yang sama.
+- **Isi berbeda:** kunci sama dengan isi berbeda dijawab `422 IDEMPOTENCY_KEY_REUSED` tanpa efek. Pakai kunci baru untuk permintaan baru.
+- **Gagal:** respons `5xx`, `429`, `503`, atau error internal melepas kunci, jadi boleh dicoba lagi dengan kunci yang sama. Respons `4xx` (mis. validasi) disimpan dan diputar ulang.
+- **Terputus:** reservasi ditulis ke SQLite (transaksi atomik, `PRIMARY KEY`) sebelum efek dijalankan. Bila server mati di tengah, ulang dengan kunci yang sama dijawab `409 IDEMPOTENCY_INTERRUPTED`, bukan mengirim ulang. Periksa dulu apakah efeknya sudah terjadi; bila belum, kirim dengan kunci baru.
+- Baris kedaluwarsa dibuang otomatis. Entri dari berkas lama `connect-idem.json` diimpor sekali lalu berkasnya diganti nama menjadi `.migrated`.
 
 ## 3. Webhook keluar (Amnan -> aplikasi)
 
@@ -158,6 +166,6 @@ UI dashboard untuk halaman ini belum dibuat; sementara gunakan `scripts/integrat
 ## 7. Batasan yang diketahui
 
 - Webhook at-least-once dan tidak berurutan; aplikasi harus idempoten dan tidak bergantung urutan.
-- Idempotensi 24 jam disimpan di berkas JSON; cukup untuk satu instance per client, bukan untuk ribuan permintaan per detik.
+- Idempotensi 24 jam disimpan di tabel SQLite `idempotency_keys` (atomik, aman lintas proses pada DB yang sama).
 - Bila nanti memakai WhatsApp Cloud API (`MIGRASI-CLOUD-API.md`), pesan di luar jendela 24 jam butuh template; `POST /api/v1/messages` akan mengembalikan `WA_UNAVAILABLE`/galat terpisah dan aplikasi perlu mendukung template.
 - Rotasi: buat kunci baru, ganti di aplikasi, cabut kunci lama. Tidak ada dua kunci aktif yang saling bergantung.

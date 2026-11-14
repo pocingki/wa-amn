@@ -395,3 +395,175 @@ test('routing: /stats, /export.csv, /from-conversation tidak tertangkap pola :id
   assert.equal((await call('GET', '/api/leads/' + l.id)).status, 200);
   assert.equal((await call('GET', '/api/leads/tidak-ada')).json.error, 'Lead tidak ditemukan');
 });
+
+// ---------- tahap Hot Lead + kirim ke Acesio ----------
+const { createServer } = await import('node:http');
+async function fakeAcesio(handler, delayMs = 0) {
+  const seen = [];
+  const srv = createServer((rq, rs) => {
+    let b = '';
+    rq.on('data', (c) => { b += c; });
+    rq.on('end', () => {
+      seen.push({ url: rq.url, key: rq.headers['x-api-key'], cid: rq.headers['x-correlation-id'], body: b ? JSON.parse(b) : null });
+      const [code, out] = handler(seen.length);
+      setTimeout(() => { rs.writeHead(code, { 'Content-Type': 'application/json' }); rs.end(JSON.stringify(out)); }, delayMs);
+    });
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  return { seen, url: 'http://127.0.0.1:' + srv.address().port, close: () => new Promise((r) => srv.close(r)) };
+}
+
+test('hotStage: lead Hot baru berawal Follow Up; PATCH memvalidasi tahap', async () => {
+  reset();
+  const l = mk({ status: 'Hot Leads', hotStage: 'Follow Up' });
+  let r = await call('PATCH', '/api/leads/' + l.id, { body: { hotStage: 'Negosiasi / Kirim Rekening' } });
+  assert.equal(r.status, 200);
+  assert.equal(r.json.lead.hotStage, 'Negosiasi / Kirim Rekening');
+  assert.equal((await call('PATCH', '/api/leads/' + l.id, { body: { hotStage: 'Menang' } })).status, 400);
+  assert.equal((await call('GET', '/api/leads')).json.hotStages.join('|'), store.HOT_STAGES.join('|'));
+});
+
+test('send-to-acesio: hanya Hot + Won; sukses menyimpan status dan kunci dikirim', async () => {
+  reset();
+  const fa = await fakeAcesio(() => [201, { id: 'ac-1' }]);
+  process.env.ACESIO_URL = fa.url + '/';
+  process.env.ACESIO_BOT_KEY = 'kunci-uji';
+  try {
+    const cold = mk({ status: 'Warm Leads' });
+    assert.equal((await call('POST', `/api/leads/${cold.id}/send-to-acesio`, { body: {} })).status, 400);
+    const hot = mk({ status: 'Hot Leads', hotStage: 'Follow Up', name: 'Sari', firstMessage: 'mau booking' });
+    assert.equal((await call('POST', `/api/leads/${hot.id}/send-to-acesio`, { body: {} })).status, 400); // belum Won
+    assert.equal((await call('GET', `/api/leads/${hot.id}/send-to-acesio`)).status, 405);
+    await call('PATCH', '/api/leads/' + hot.id, { body: { hotStage: 'Won' } });
+    const r = await call('POST', `/api/leads/${hot.id}/send-to-acesio`, { body: {} });
+    assert.equal(r.status, 200);
+    assert.equal(r.json.lead.acesioStatus, 'sent');
+    assert.ok(r.json.lead.acesioSentAt > 0);
+    assert.equal(fa.seen.length, 1);
+    assert.equal(fa.seen[0].url, '/api/bot/incoming-leads');
+    assert.equal(fa.seen[0].key, 'kunci-uji');
+    assert.equal(fa.seen[0].body.wa_lead_id, hot.id);
+    assert.equal(fa.seen[0].body.name, 'Sari');
+    assert.equal(r.audits[0].action, 'lead.send_to_acesio');
+  } finally { await fa.close(); delete process.env.ACESIO_URL; delete process.env.ACESIO_BOT_KEY; }
+});
+
+test('send-to-acesio: Acesio menolak (401) -> 502, bukan 401; lead tidak ditandai terkirim; server mati -> 502', async () => {
+  reset();
+  const fa = await fakeAcesio(() => [401, { error: 'API key salah' }]);
+  process.env.ACESIO_URL = fa.url;
+  process.env.ACESIO_BOT_KEY = 'kunci-uji';
+  try {
+    const hot = mk({ status: 'Hot Leads', hotStage: 'Won' });
+    const r = await call('POST', `/api/leads/${hot.id}/send-to-acesio`, { body: {} });
+    assert.equal(r.status, 502);
+    assert.match(r.json.error, /HTTP 401.*API key salah/);
+    assert.notEqual(store.all().find((x) => x.id === hot.id).acesioStatus, 'sent');
+    await fa.close();
+    const r2 = await call('POST', `/api/leads/${hot.id}/send-to-acesio`, { body: {} });
+    assert.equal(r2.status, 502);
+    assert.match(r2.json.error, /Gagal menghubungi Acesio/);
+  } finally { delete process.env.ACESIO_URL; delete process.env.ACESIO_BOT_KEY; }
+});
+
+// ---- Ketahanan integrasi Acesio (server Acesio PALSU lokal = simulasi, bukan Acesio nyata) ----
+const withLogs = async (fn) => {
+  const lines = []; const orig = console.log;
+  console.log = (...a) => { lines.push(a.join(' ')); };
+  try { return [await fn(), lines]; } finally { console.log = orig; }
+};
+const ACE_ENV = ['ACESIO_URL', 'ACESIO_BOT_KEY', 'ACESIO_TIMEOUT_MS'];
+const clearAce = () => ACE_ENV.forEach((k) => delete process.env[k]);
+
+test('send-to-acesio: tanpa ACESIO_BOT_KEY -> 503 tegas, tidak ada panggilan keluar', async () => {
+  reset();
+  const fa = await fakeAcesio(() => [201, {}]);
+  process.env.ACESIO_URL = fa.url; delete process.env.ACESIO_BOT_KEY; delete process.env.ACESIO_API_KEY; delete process.env.BOT_API_KEY;
+  try {
+    const hot = mk({ status: 'Hot Leads', hotStage: 'Won' });
+    const r = await call('POST', `/api/leads/${hot.id}/send-to-acesio`, { body: {} });
+    assert.equal(r.status, 503);
+    assert.match(r.json.error, /ACESIO_BOT_KEY/);
+    assert.equal(fa.seen.length, 0);
+  } finally { await fa.close(); clearAce(); }
+});
+
+test('send-to-acesio: X-Correlation-ID sama di header, respons, audit; log tanpa kunci/isi pesan', async () => {
+  reset();
+  const fa = await fakeAcesio(() => [201, { id: 'ac-9' }]);
+  process.env.ACESIO_URL = fa.url; process.env.ACESIO_BOT_KEY = 'RAHASIA-KUNCI-123';
+  try {
+    const hot = mk({ status: 'Hot Leads', hotStage: 'Won', phone: '628123456789', firstMessage: 'ISI-PESAN-RAHASIA' });
+    const [r, logs] = await withLogs(() => call('POST', `/api/leads/${hot.id}/send-to-acesio`, { body: {} }));
+    assert.equal(r.status, 200);
+    assert.ok(r.json.cid);
+    assert.equal(fa.seen[0].cid, r.json.cid);
+    assert.equal(r.audits[0].detail?.cid ?? r.audits[0].cid ?? r.audits[0].meta?.cid, r.json.cid);
+    const log = logs.filter((x) => x.startsWith('[acesio]')).join('\n');
+    assert.match(log, new RegExp(r.json.cid));
+    assert.doesNotMatch(log, /RAHASIA-KUNCI-123|ISI-PESAN-RAHASIA|628123456789/);
+    assert.match(log, /\*+6789/);
+  } finally { await fa.close(); clearAce(); }
+});
+
+test('send-to-acesio: timeout -> 502, lead tetap ada, status failed + alasan tersimpan', async () => {
+  reset();
+  const fa = await fakeAcesio(() => [201, {}], 3000);
+  process.env.ACESIO_URL = fa.url; process.env.ACESIO_BOT_KEY = 'k'; process.env.ACESIO_TIMEOUT_MS = '1000';
+  try {
+    const hot = mk({ status: 'Hot Leads', hotStage: 'Won', name: 'Sari' });
+    const [r] = await withLogs(() => call('POST', `/api/leads/${hot.id}/send-to-acesio`, { body: {} }));
+    assert.equal(r.status, 502);
+    assert.match(r.json.error, /tidak merespons: timeout setelah 1000 ms/);
+    const after = store.all().find((x) => x.id === hot.id);
+    assert.equal(after.name, 'Sari');
+    assert.equal(after.acesioStatus, 'failed');
+    assert.match(after.acesioLastError, /timeout/);
+    assert.equal(r.audits[0].action, 'lead.send_to_acesio_failed');
+  } finally { await fa.close(); clearAce(); }
+});
+
+test('send-to-acesio: kirim bersamaan -> yang kedua 409, Acesio hanya dipanggil sekali', async () => {
+  reset();
+  const fa = await fakeAcesio(() => [201, {}], 300);
+  process.env.ACESIO_URL = fa.url; process.env.ACESIO_BOT_KEY = 'k';
+  try {
+    const hot = mk({ status: 'Hot Leads', hotStage: 'Won' });
+    const [a, b] = await Promise.all([
+      call('POST', `/api/leads/${hot.id}/send-to-acesio`, { body: {} }),
+      call('POST', `/api/leads/${hot.id}/send-to-acesio`, { body: {} }),
+    ]);
+    assert.deepEqual([a.status, b.status].sort(), [200, 409]);
+    assert.equal(fa.seen.length, 1);
+  } finally { await fa.close(); clearAce(); }
+});
+
+test('send-to-acesio: kirim ulang gagal tidak menurunkan status sent', async () => {
+  reset();
+  let n = 0;
+  const fa = await fakeAcesio(() => (++n === 1 ? [201, {}] : [500, { error: 'boom' }]));
+  process.env.ACESIO_URL = fa.url; process.env.ACESIO_BOT_KEY = 'k';
+  try {
+    const hot = mk({ status: 'Hot Leads', hotStage: 'Won' });
+    assert.equal((await call('POST', `/api/leads/${hot.id}/send-to-acesio`, { body: {} })).status, 200);
+    const r2 = await call('POST', `/api/leads/${hot.id}/send-to-acesio`, { body: {} });
+    assert.equal(r2.status, 502);
+    const after = store.all().find((x) => x.id === hot.id);
+    assert.equal(after.acesioStatus, 'sent');
+    assert.match(after.acesioLastError, /HTTP 500/);
+  } finally { await fa.close(); clearAce(); }
+});
+
+test('send-to-acesio: penyimpanan status gagal setelah Acesio menerima -> 200 + warning (bukan gagal palsu)', async () => {
+  reset();
+  const fa = await fakeAcesio(() => [201, { id: 'x' }]);
+  process.env.ACESIO_URL = fa.url; process.env.ACESIO_BOT_KEY = 'k';
+  try {
+    const hot = mk({ status: 'Hot Leads', hotStage: 'Won' });
+    Object.freeze(store.all().find((x) => x.id === hot.id)); // simulasi: penyimpanan menolak tulis -> update() melempar
+    const [r] = await withLogs(() => call('POST', `/api/leads/${hot.id}/send-to-acesio`, { body: {} }));
+    assert.equal(r.status, 200);
+    assert.match(r.json.warning, /gagal disimpan/);
+    assert.equal(fa.seen.length, 1);
+  } finally { await fa.close(); clearAce(); }
+});

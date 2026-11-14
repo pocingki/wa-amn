@@ -86,6 +86,12 @@ function reconcile(d, phone, lid) {
   }
 }
 
+// Simpan sinkron bila tersedia (DB nyata); deps tes boleh hanya punya save().
+function durable(d, conv) {
+  if (typeof d.convs.saveNow === 'function') d.convs.saveNow(conv);
+  else d.convs.save(conv);
+}
+
 export async function processIncoming(msg, d) {
   const key = msg.phone || msg.lid;
   if (!key || msg.kind === 'reaction' || msg.kind === 'system') return null;
@@ -101,10 +107,15 @@ export async function processIncoming(msg, d) {
   const nameBefore = conv.name;
   const media = { type: msg.kind, mediaId: msg.mediaId, caption: msg.caption, waId: msg.waId };
 
+  // Pengiriman ulang (id WA sama): pesan yang sudah selesai diproses dilewati; yang belum dilanjutkan.
+  const prior = msg.waId ? conv.messages.find((x) => x.waId === msg.waId && x.by === (msg.fromPhone ? 'admin' : 'customer')) : null;
+  if (prior?.handled) return { conv, message: prior, replies: [], lead: null, changes: null, attention: null, duplicate: true };
+
   // Pesan dari HP admin: auto-takeover, tidak masuk CRM.
   if (msg.fromPhone) {
-    const m = d.convs.addMessage(conv, 'admin', msg.text, msg.ts);
+    const m = prior || d.convs.addMessage(conv, 'admin', msg.text, msg.ts);
     Object.assign(m, media, { sender: 'HP' });
+    durable(d, conv); // simpan dulu (lempar galat bila gagal) sebelum efek lain
     if (S.autoTakeoverOnPhoneReply && conv.mode === 'bot') {
       setMode(conv, 'admin', now);
       d.convs.addMessage(conv, 'system', 'Admin membalas dari HP. Bot dinonaktifkan untuk percakapan ini.', now);
@@ -115,22 +126,32 @@ export async function processIncoming(msg, d) {
     conv.attentionAt = null;
     const lead = findLead(d, msg.phone, msg.lid);
     if (lead) d.leads.update(lead.id, { lastReplyAt: msg.ts });
+    m.handled = true;
     d.convs.save();
     d.emit('message:new', { phone: key, by: 'admin', type: msg.kind });
     return { conv, message: m, replies: [], lead, changes: null, attention: null };
   }
 
   // Pesan pelanggan.
-  const message = d.convs.addMessage(conv, 'customer', msg.text, msg.ts);
-  Object.assign(message, media);
-  conv.unread = (conv.unread || 0) + 1;
+  const message = prior || d.convs.addMessage(conv, 'customer', msg.text, msg.ts);
+  if (!prior) {
+    Object.assign(message, media);
+    conv.unread = (conv.unread || 0) + 1;
+  }
+  durable(d, conv); // pesan pelanggan tersimpan durable SEBELUM CRM/bot; gagal -> lempar, tidak ditandai seen
   const customerCount = conv.messages.filter((m) => m.by === 'customer' && m.type !== 'reaction' && m.type !== 'system').length;
-  const res = d.ingest({
-    phone: msg.phone, lid: msg.lid, name: conv.name || msg.name, text: msg.text,
-    ts: msg.ts, customerCount, kind: msg.kind, source: msg.source,
-  });
+  let res = null;
+  if (!message.ingested) {
+    res = d.ingest({
+      phone: msg.phone, lid: msg.lid, name: conv.name || msg.name, text: msg.text,
+      ts: msg.ts, customerCount, kind: msg.kind, source: msg.source,
+    });
+    message.ingested = true;
+  }
 
-  const p = plan(conv, { text: msg.text, caption: msg.caption, kind: msg.kind, ts: msg.ts }, S, now);
+  // Percobaan ulang: bila bot sudah membalas pesan ini, jangan membalas lagi (cegah respons ganda).
+  const alreadyReplied = !!prior && conv.messages.slice(conv.messages.indexOf(prior) + 1).some((x) => x.by === 'bot');
+  const p = alreadyReplied ? { replies: [], attention: null } : plan(conv, { text: msg.text, caption: msg.caption, kind: msg.kind, ts: msg.ts }, S, now);
   if (p.returnedToBot) {
     d.convs.addMessage(conv, 'system', `Admin tidak membalas lebih dari ${p.returnedToBot} menit. Bot aktif kembali untuk percakapan ini.`, now);
     conv.needsAttention = false;
@@ -172,6 +193,7 @@ export async function processIncoming(msg, d) {
       lead = findLead(d, msg.phone, msg.lid) || lead;
     }
   }
+  message.handled = true; // selesai: balasan terkirim atau gagal tercatat (status failed + perlu perhatian)
   d.convs.save();
   d.emit('message:new', { phone: key, by: 'customer', type: msg.kind });
   d.emit('unread', { total: d.convs.totalUnread() });
@@ -183,14 +205,14 @@ const queues = new Map();
 export function handleIncoming(msg, send) {
   const k = msg.phone || msg.lid || '';
   const prev = queues.get(k) || Promise.resolve();
-  const p = prev
-    .then(() => processIncoming(msg, makeRealDeps(send)))
-    .catch((e) => console.error('[bot]', e))
-    .finally(() => {
-      if (queues.get(k) === p) queues.delete(k);
-    });
-  queues.set(k, p);
-  return p;
+  const run = prev.then(() => processIncoming(msg, makeRealDeps(send)));
+  // Antrean tetap jalan walau satu pesan gagal; pemanggil menerima galatnya (tidak ditelan)
+  // supaya pesan yang gagal diproses tidak ditandai seen dan bisa dicoba ulang.
+  const tail = run.catch(() => {}).finally(() => {
+    if (queues.get(k) === tail) queues.delete(k);
+  });
+  queues.set(k, tail);
+  return run;
 }
 
 function findByWaId(d, waId) {

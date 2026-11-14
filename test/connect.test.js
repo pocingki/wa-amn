@@ -101,18 +101,17 @@ test('withIdempotency: efek sekali, replay, dan permintaan serentak', async () =
   assert.throws(() => C.idemKeyFrom({ headers: { 'idempotency-key': 'pendek' } }, {}), /8-120/);
   assert.equal(C.idemKeyFrom({ headers: {} }, {}), null);
 
-  const idemFile = path.join(dir, 'connect-idem.json');
-  let during = '';
+  // reservasi 'pending' sudah ada di tabel SQLite sebelum efek dijalankan; hasil disimpan sesudahnya
+  const D = await import('../src/db.js');
+  const q = () => D.getDb().prepare("SELECT state, status FROM idempotency_keys WHERE app_id='k1' AND state IS NOT NULL ORDER BY created_at DESC").all();
+  let during = null;
   await C.withIdempotency('k1', 'kunci-idem-awal', async () => {
-    during = fs.readFileSync(idemFile, 'utf8');
+    during = D.getDb().prepare("SELECT state FROM idempotency_keys WHERE state='pending'").all();
     return { status: 200, body: { ok: true } };
   });
-  assert.match(during, /kunci-idem-awal/);
-  assert.match(during, /"pending": true/);
-  const after = JSON.parse(fs.readFileSync(idemFile, 'utf8'));
-  const row = after.entries['k1:kunci-idem-awal'];
-  assert.equal(row.pending, undefined);
-  assert.equal(row.status, 200);
+  assert.equal(during.length, 1);
+  assert.equal(q().filter((r) => r.state === 'pending').length, 0);
+  assert.ok(q().some((r) => r.state === 'done' && r.status === 200));
   const again = await C.withIdempotency('k1', 'kunci-idem-awal', async () => ({ status: 200, body: { ok: false } }));
   assert.equal(again.replay, true);
   assert.equal(again.body.ok, true);

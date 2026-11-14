@@ -121,8 +121,9 @@ function sweep() {
   schedule();
 }
 
+/** Menulis perubahan ke DB. Mengembalikan false bila ada perubahan yang gagal ditulis. */
 function persist() {
-  if (!ready) return;
+  if (!ready) return true;
   clearTimeout(timer);
   timer = null;
   const { ids, all } = tracker.take();
@@ -147,6 +148,8 @@ function persist() {
     if (op.metaJson || op.msgUp.length || op.msgDel.length) ops.push(op);
   }
   const gone = [...written.keys()].filter((p) => !convs[p]);
+  let ok = true;
+  if ((ops.length || gone.length) && !D.canWrite()) ok = false;
   if ((ops.length || gone.length) && D.canWrite()) {
     try {
       D.tx((db) => {
@@ -182,11 +185,12 @@ function persist() {
       D.noteWriteError(e);
       tracker.retouch(ids);
       if (D.canWrite()) schedule(1000);
-      return;
+      return false;
     }
   }
   const next = tracker.nextAt();
   if (next) schedule(Math.max(next - Date.now(), 50));
+  return ok;
 }
 
 function checkUnread() {
@@ -202,6 +206,20 @@ export function save(conv) {
   ensure();
   if (conv?.phone) tracker.touch(conv.phone);
   schedule();
+  checkUnread();
+}
+/**
+ * Tulis percakapan ini ke DB SEKARANG (sinkron) dan lempar galat bila gagal.
+ * Dipakai alur pesan masuk: pesan pelanggan harus durable sebelum diproses/ditandai seen.
+ */
+export function saveNow(conv) {
+  ensure();
+  if (conv?.phone) tracker.touch(conv.phone);
+  if (!persist()) {
+    if (conv?.phone) tracker.touch(conv.phone);
+    schedule(1000);
+    throw new Error('Pesan gagal disimpan ke database');
+  }
   checkUnread();
 }
 export const touch = (conv) => { ensure(); if (conv?.phone) tracker.touch(conv.phone); };

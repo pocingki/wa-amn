@@ -269,6 +269,9 @@ export function normalizeLead(lead) {
   fill('blocked', false);
   fill('followUpDate', null);
   fill('followUpNote', '');
+  fill('hotStage', l.status === 'Hot Leads' ? (l.hotStage || 'Follow Up') : null);
+  fill('acesioStatus', 'none');
+  fill('acesioSentAt', null);
   l.statusHistory = Array.isArray(l.statusHistory) ? [...l.statusHistory] : [];
   l.warmReasons = Array.isArray(l.warmReasons) ? [...l.warmReasons] : [];
   l.notes = Array.isArray(l.notes) ? [...l.notes] : [];
@@ -371,6 +374,8 @@ export function classify(prev, msg = {}, config = getConfig()) {
       messageCount: count, createdAt: ts, lastMessageAt: ts, lastCustomerMessageAt: ts,
       warmScore: w.score, warmReasons: w.reasons, warmFlags: flags,
       hotCandidate: null, blocked: false, notes: [], followUpDate: null, followUpNote: '',
+      hotStage: status === 'Hot Leads' ? 'Follow Up' : null,
+      acesioStatus: 'none', acesioSentAt: null,
     };
     if (sig.weak.length) lead.lastWeakAt = ts;
     if (sig.strong.length) lead.lastStrongAt = ts;
@@ -407,8 +412,8 @@ export function classify(prev, msg = {}, config = getConfig()) {
   if (!lead.statusManual && lead.status !== 'Hot Leads') {
     const before = lead.status;
     let reason = null;
-    if (sig.strong.length) { lead.status = 'Hot Leads'; reason = R.hot(sig.strong); }
-    else if (lead.dataType === 'Existing') { lead.status = 'Hot Leads'; reason = R.hotExisting; }
+    if (sig.strong.length) { lead.status = 'Hot Leads'; reason = R.hot(sig.strong); lead.hotStage = lead.hotStage || 'Follow Up'; }
+    else if (lead.dataType === 'Existing') { lead.status = 'Hot Leads'; reason = R.hotExisting; lead.hotStage = lead.hotStage || 'Follow Up'; }
     else if (before === 'Cold Leads' && (useScore ? w.score >= ws.threshold : count > warmAfter)) {
       lead.status = 'Warm Leads';
       reason = useScore ? R.warmScore(w.score, ws.threshold, w.reasons) : R.warmLegacy(count, warmAfter);

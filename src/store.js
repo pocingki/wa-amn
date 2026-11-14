@@ -6,6 +6,7 @@ import * as D from './db.js';
 
 export const STATUSES = ['Cold Leads', 'Warm Leads', 'Hot Leads'];
 export const DATA_TYPES = ['New', 'Existing'];
+export const HOT_STAGES = ['Follow Up', 'Negosiasi / Kirim Rekening', 'Won', 'Lost'];
 
 // Migrasi status lama ke status baru
 const OLD = { Baru: 'Warm Leads', 'Dalam Proses': 'Warm Leads', Deal: 'Hot Leads', Gagal: 'Cold Leads' };

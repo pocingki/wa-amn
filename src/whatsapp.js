@@ -29,6 +29,8 @@ export function createWhatsApp(deps = {}) {
   const emit = deps.emit || ((t, p) => eventsMod.emit(t, p));
   const now = deps.now || Date.now;
   const mediaTimeoutMs = deps.mediaTimeoutMs ?? 20000;
+  const retryDelaysMs = deps.retryDelaysMs ?? [1000, 4000]; // percobaan ulang setelah gagal proses
+  const sleep = deps.sleep || ((ms) => new Promise((r) => setTimeout(r, ms)));
 
   const connection =
     deps.connection ||
@@ -76,9 +78,40 @@ export function createWhatsApp(deps = {}) {
         held = true;
       }
 
+      // Seluruh langkah (parse -> identitas -> media -> simpan/proses) diulang bila gagal.
+      // Aman diulang: pipeline mengenali id WA yang sama dan tidak menggandakan pesan atau balasan.
+      let lastErr;
+      for (let attempt = 0; attempt <= retryDelaysMs.length; attempt++) {
+        if (attempt) await sleep(retryDelaysMs[attempt - 1]);
+        try {
+          commit = await processOnce(raw, key, rjid, waId, fromMe);
+          lastErr = null;
+          break;
+        } catch (e) {
+          lastErr = e;
+          console.error(`[wa] gagal memproses pesan (percobaan ${attempt + 1}/${retryDelaysMs.length + 1}):`, e);
+        }
+      }
+      if (lastErr) {
+        // Tidak ditandai seen: bila WhatsApp mengirim ulang, pesan diproses lagi. Dicatat agar tidak hilang diam-diam.
+        emit('wa:process_failed', { waId, error: String(lastErr?.message || lastErr).slice(0, 200) });
+      }
+    } catch (err) {
+      console.error('[wa] gagal memproses pesan:', err);
+    } finally {
+      if (held) {
+        if (commit) convs.markSeen(waId);
+        inflight.delete(waId);
+      }
+    }
+  }
+
+  // Satu percobaan. Mengembalikan true bila selesai dengan sengaja (diproses atau memang diabaikan).
+  async function processOnce(raw, key, rjid, waId, fromMe) {
+    {
       const ext = extractMessage(raw);
-      if (!ext) { commit = true; return; }
-      if (fromMe && (ext.kind === 'reaction' || ext.kind === 'system')) { commit = true; return; }
+      if (!ext) return true;
+      if (fromMe && (ext.kind === 'reaction' || ext.kind === 'system')) return true;
 
       const id = await resolveIdentity(
         { remoteJid: key.remoteJid, remoteJidAlt: key.remoteJidAlt, participant: key.participant, participantAlt: key.participantAlt },
@@ -99,7 +132,7 @@ export function createWhatsApp(deps = {}) {
         }
       }
 
-      if (ext.kind === 'text' && !String(ext.text || '').trim()) { commit = true; return; }
+      if (ext.kind === 'text' && !String(ext.text || '').trim()) return true;
 
       const envelope = {
         waId,
@@ -118,14 +151,7 @@ export function createWhatsApp(deps = {}) {
         source: { platform: '', adId: '', ctwaClid: '', sourceUrl: '', referralCode: '', ...(ext.source || {}) },
       };
       await Promise.resolve(handleIncoming(envelope, sendText));
-      commit = true;
-    } catch (err) {
-      console.error('[wa] gagal memproses pesan:', err);
-    } finally {
-      if (held) {
-        if (commit) convs.markSeen(waId);
-        inflight.delete(waId);
-      }
+      return true;
     }
   }
 

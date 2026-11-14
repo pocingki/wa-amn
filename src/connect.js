@@ -6,7 +6,10 @@ import http from 'node:http';
 import https from 'node:https';
 import net from 'node:net';
 import * as events from './events.js';
-import { load, save } from './jsonfile.js';
+import fs from 'node:fs';
+import path from 'node:path';
+import * as D from './db.js';
+import { load, save, dataDir } from './jsonfile.js';
 import { HttpError, limiter, ipKey, audit } from './auth.js';
 
 export const CONTRACT = '1';
@@ -55,7 +58,7 @@ const readKeys = () => {
   return keysCache;
 };
 const writeKeys = (list) => { save(KEYS_FILE, { keys: list }); keysCache = list; keysAt = Date.now(); };
-export const _resetCaches = () => { keysCache = null; hooksCache = null; outbox = null; idem = null; lastTouch.clear(); };
+export const _resetCaches = () => { keysCache = null; hooksCache = null; outbox = null; inflight.clear(); lastPurge = 0; legacyDone = false; lastTouch.clear(); };
 
 const APP_RE = /^[a-z][a-z0-9-]{1,23}$/;
 const publicKey = (k) => ({
@@ -141,68 +144,127 @@ export function refundMessageQuota(keyId, now = new Date()) {
   writeKeys(list.map((x) => (x === k ? { ...x, usage: { day, n: k.usage.n - 1 } } : x)));
 }
 
-// ---------------------------------------------------------------- Idempotensi (24 jam)
+// ---------------------------------------------------------------- Idempotensi (24 jam, SQLite)
+//
+// Kebijakan:
+//  - Ruang kunci = (id kunci API/aplikasi, endpoint, Idempotency-Key). Klien atau endpoint lain tidak pernah berbagi kunci.
+//  - Reservasi = INSERT ke tabel idempotency_keys (PRIMARY KEY) di dalam transaksi BEGIN IMMEDIATE: atomik, tanpa jeda tulis,
+//    dan aman bila ada lebih dari satu proses. Disimpan sebelum efek dijalankan.
+//  - Selesai 2xx/4xx tetap -> respons disimpan dan diputar ulang (Idempotent-Replay). 5xx/429/503 atau exception -> kunci dilepas,
+//    boleh dicoba lagi dengan kunci yang sama.
+//  - Kunci sama + isi berbeda -> 422 IDEMPOTENCY_KEY_REUSED (tidak mengeksekusi, tidak memutar ulang).
+//  - Sedang berjalan di proses ini -> permintaan serentak menunggu hasil yang sama. Proses mati di tengah -> baris 'pending' tetap
+//    ada dan dibalas 409 IDEMPOTENCY_INTERRUPTED (efek mungkin sudah terjadi; periksa dulu, lalu pakai kunci baru bila perlu).
+//  - Masa berlaku 24 jam sejak dibuat; baris kedaluwarsa dibuang otomatis.
+export const IDEM_TTL = IDEM_TTL_MS;
+const IDEM_KEY_RE = /^[A-Za-z0-9._:+=~-]{8,120}$/;
+const inflight = new Map(); // k -> Promise hasil (hanya proses ini)
+let lastPurge = 0;
+let legacyDone = false;
 
-let idem = null; // "<keyId>:<kunci>" -> { ts, status, body }
-const inflight = new Map();
-const idemMap = () => {
-  if (!idem) {
-    const raw = load(IDEM_FILE, { entries: {} });
-    idem = new Map(Object.entries(raw?.entries && typeof raw.entries === 'object' ? raw.entries : {}));
-  }
-  return idem;
-};
-function flushIdem() {
-  if (!idem) return;
-  const t = Date.now();
-  for (const [k, v] of idem) if (t - v.ts > IDEM_TTL_MS) idem.delete(k);
-  try { save(IDEM_FILE, { entries: Object.fromEntries(idem) }); } catch (e) { console.warn('[connect] idempotensi gagal disimpan:', e.message); }
+const idemHash = (keyId, endpoint, key) => sha256(`${keyId}\0${endpoint}\0${key}`);
+
+/** Urutan kunci objek distabilkan supaya sidik jari tidak bergantung urutan properti JSON. */
+export function canonicalJson(v) {
+  if (Array.isArray(v)) return `[${v.map(canonicalJson).join(',')}]`;
+  if (v && typeof v === 'object') return `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canonicalJson(v[k])}`).join(',')}}`;
+  return JSON.stringify(v) ?? 'null';
 }
+export const requestFingerprint = (method, endpoint, body) => {
+  const { idempotencyKey, ...rest } = body && typeof body === 'object' && !Array.isArray(body) ? body : { _: body ?? null };
+  return sha256(`${method}\n${endpoint}\n${canonicalJson(rest)}`);
+};
 
+/** Ambil kunci dari header (atau body.idempotencyKey). null bila tidak ada; lempar 400 bila format salah. */
 export const idemKeyFrom = (req, body) => {
-  const k = String(req.headers['idempotency-key'] ?? body?.idempotencyKey ?? '').trim();
+  const h = req.headers['idempotency-key'];
+  const fromBody = body && typeof body === 'object' ? body.idempotencyKey : undefined;
+  const hv = h === undefined ? '' : String(h).trim();
+  const bv = fromBody === undefined || fromBody === null ? '' : String(fromBody).trim();
+  if (hv && bv && hv !== bv) throw verr('Idempotency-Key di header dan body berbeda');
+  const k = hv || bv;
   if (!k) return null;
-  if (k.length < 8 || k.length > 120) throw verr('Idempotency-Key harus 8-120 karakter');
+  if (!IDEM_KEY_RE.test(k)) throw verr('Idempotency-Key harus 8-120 karakter dari A-Z a-z 0-9 . _ : + = ~ -');
   return k;
 };
 
-const idemLive = (row) => row && Date.now() - row.ts <= IDEM_TTL_MS;
+const iErr = (status, code, error) => ({ status, body: { error, code }, replay: true });
 
-/** Jalankan fn sekali per (kunci, idempotencyKey). fn -> { status, body }.
- *  Reservasi ditulis ke disk sebelum efek, jadi proses yang mati di tengah tidak mengirim ulang.
- *  Hanya respons 2xx/4xx tetap yang disimpan. 429, 503, dan 5xx boleh dicoba lagi. */
-export async function withIdempotency(keyId, idemKey, fn) {
+function purgeIdem(now) {
+  if (now - lastPurge < 60_000) return;
+  lastPurge = now;
+  try { D.getDb().prepare('DELETE FROM idempotency_keys WHERE expires_at <= ?').run(now); } catch (e) { D.noteWriteError(e); }
+}
+
+/** Impor sekali dari berkas lama connect-idem.json (kunci "<keyId>:<kunci>", tanpa endpoint) lalu ganti namanya. */
+function importLegacy(now) {
+  if (legacyDone) return;
+  legacyDone = true;
+  const raw = load(IDEM_FILE, null);
+  if (!raw?.entries || typeof raw.entries !== 'object') return;
+  const rows = Object.entries(raw.entries).filter(([, v]) => v && now - v.ts <= IDEM_TTL_MS);
+  const db = D.getDb();
+  D.tx(() => {
+    const ins = db.prepare('INSERT OR IGNORE INTO idempotency_keys(k, app_id, endpoint, fp, state, status, body, created_at, expires_at) VALUES(?,?,?,?,?,?,?,?,?)');
+    for (const [k, v] of rows) {
+      const i = k.indexOf(':');
+      const app = k.slice(0, i), key = k.slice(i + 1);
+      ins.run(idemHash(app, '*legacy*', key), app, '*legacy*', null, v.pending ? 'pending' : 'done', v.pending ? null : v.status, v.pending ? null : D.encodeBlob(v.body), v.ts, v.ts + IDEM_TTL_MS);
+    }
+  });
+  try { fs.renameSync(path.join(dataDir(), IDEM_FILE), path.join(dataDir(), `${IDEM_FILE}.migrated`)); } catch { /* sudah dipindah */ }
+}
+
+/** Jalankan fn sekali per (keyId, endpoint, idemKey). fn -> { status, body }.
+ *  opts: { endpoint, fingerprint }. Tanpa idemKey, fn dijalankan apa adanya. */
+export async function withIdempotency(keyId, idemKey, fn, { endpoint = '', fingerprint = null } = {}) {
   if (!idemKey) return { ...(await fn()), replay: false };
-  const k = `${keyId}:${idemKey}`;
-  const hit = idemMap().get(k);
-  if (idemLive(hit) && !hit.pending) return { status: hit.status, body: hit.body, replay: true };
-  if (inflight.has(k)) {
-    const r = await inflight.get(k);
-    return { ...r, replay: true };
+  const now = Date.now();
+  const k = idemHash(keyId, endpoint, idemKey);
+  const db = D.getDb();
+  importLegacy(now);
+  purgeIdem(now);
+
+  // Reservasi atomik: baca + putuskan + sisipkan dalam satu transaksi tulis.
+  const decision = D.tx(() => {
+    let row = db.prepare('SELECT * FROM idempotency_keys WHERE k=?').get(k);
+    if (row && row.expires_at <= now) { db.prepare('DELETE FROM idempotency_keys WHERE k=?').run(k); row = null; }
+    if (!row) {
+      const old = db.prepare('SELECT * FROM idempotency_keys WHERE k=? AND expires_at>?').get(idemHash(keyId, '*legacy*', idemKey), now);
+      if (old) row = old;
+    }
+    if (row) return { row };
+    db.prepare('INSERT INTO idempotency_keys(k, app_id, endpoint, fp, state, created_at, expires_at) VALUES(?,?,?,?,?,?,?)')
+      .run(k, String(keyId), endpoint, fingerprint, 'pending', now, now + IDEM_TTL_MS);
+    return { reserved: true };
+  });
+
+  if (!decision.reserved) {
+    const { row } = decision;
+    if (row.fp && fingerprint && row.fp !== fingerprint) {
+      return iErr(422, 'IDEMPOTENCY_KEY_REUSED', 'Idempotency-Key ini sudah dipakai untuk permintaan dengan isi berbeda. Gunakan kunci baru untuk permintaan baru.');
+    }
+    if (row.state === 'done') return { status: row.status, body: D.decodeBlob(row.body), replay: true };
+    if (inflight.has(k)) return { ...(await inflight.get(k)), replay: true }; // permintaan serentak: tunggu hasil yang sama
+    return iErr(409, 'IDEMPOTENCY_INTERRUPTED', 'Permintaan dengan Idempotency-Key ini terputus saat diproses (mis. server restart) dan hasilnya tidak diketahui. Periksa dulu apakah efeknya sudah terjadi; jika belum, kirim ulang dengan Idempotency-Key baru.');
   }
-  if (idemLive(hit) && hit.pending) return { status: hit.status, body: hit.body, replay: true };
 
   let finish;
   const gate = new Promise((resolve, reject) => { finish = { resolve, reject }; });
-  gate.catch(() => {}); // penolakan tetap sampai ke pemanggil yang menunggu; tanpa ini proses melihat unhandledRejection
+  gate.catch(() => {}); // penolakan sampai ke penunggu; tanpa ini proses melihat unhandledRejection
   inflight.set(k, gate);
-  idemMap().set(k, {
-    ts: Date.now(),
-    pending: true,
-    status: 409,
-    body: { error: 'Permintaan dengan Idempotency-Key ini belum selesai. Ulangi kunci yang sama, jangan buat kunci baru.', code: 'IN_PROGRESS' },
-  });
-  flushIdem();
+  const release = () => D.getDb().prepare('DELETE FROM idempotency_keys WHERE k=? AND state=?').run(k, 'pending');
   try {
     const r = await fn();
-    if (r.status < 500 && r.status !== 429 && r.status !== 503) idemMap().set(k, { ts: Date.now(), status: r.status, body: r.body });
-    else idemMap().delete(k);
-    flushIdem();
+    if (r.status < 500 && r.status !== 429 && r.status !== 503) {
+      D.tx(() => D.getDb().prepare("UPDATE idempotency_keys SET state='done', status=?, body=? WHERE k=?").run(r.status, D.encodeBlob(r.body), k));
+    } else {
+      release(); // gagal sementara: boleh dicoba lagi dengan kunci yang sama
+    }
     finish.resolve(r);
     return { ...r, replay: false };
   } catch (e) {
-    idemMap().delete(k);
-    flushIdem();
+    try { release(); } catch (e2) { D.noteWriteError(e2); }
     finish.reject(e);
     throw e;
   } finally {
@@ -578,5 +640,4 @@ export function stop() {
 export function flush() {
   clearTimeout(outTimer); outTimer = null;
   flushOutbox();
-  flushIdem();
 }

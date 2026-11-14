@@ -3,7 +3,7 @@ import './platform.js';
 import {
   $, api, esc, icon, getMe, ROLE_LABEL, csrfToken, onEvent, notify, debounce, toast, popMenu, waStatusView,
   loadSettings, getSettings, setBaseTitle, setUnreadTotal, getActiveChat, unlockAudio, soundOn, setSound,
-  notificationState, requestNotifications, rememberPage, savedPage,
+  notificationState, requestNotifications, rememberPage, savedPage, isAdminRole,
 } from './lib.js';
 
 const ROUTES = {
@@ -23,13 +23,32 @@ let pageTitle = '';
 const updateTitle = () => setBaseTitle(`${pageTitle ? pageTitle + ' - ' : ''}${brand} - Lead Tracker Gateway`);
 
 // ---------- router ----------
+/** Menu khusus admin: default tersembunyi; dibuka hanya untuk admin, dihapus dari DOM untuk peran lain. Penegakan sebenarnya di server. */
+let roleReady = null;
+function applyRole() {
+  roleReady ||= getMe().then((m) => {
+    const admin = isAdminRole(m);
+    document.querySelectorAll('[data-admin-only]').forEach((a) => { if (admin) a.hidden = false; else a.remove(); });
+    return admin;
+  }).catch(() => {
+    document.querySelectorAll('[data-admin-only]').forEach((a) => a.remove()); // peran tidak diketahui: jangan tampilkan
+    return false;
+  });
+  return roleReady;
+}
+
 async function go() {
   const raw = location.hash.slice(1).split('?')[0];
   if (raw === '' || raw === '/') {
     location.replace(savedPage() || '#/crm'); // hashchange memuat halaman yang sama dengan sebelum refresh
     return;
   }
-  const path = ROUTES[raw] ? raw : null;
+  let path = ROUTES[raw] ? raw : null;
+  if (path === '/integrasi' && !(await applyRole())) { // bukan admin: kembali ke CRM, bukan sekadar halaman kosong
+    toast('Menu Integrasi khusus Admin.', true);
+    location.replace('#/crm');
+    return;
+  }
   const id = ++navId;
   document.querySelectorAll('.nav-link').forEach((a) => {
     const on = a.dataset.r === path;
@@ -198,6 +217,7 @@ function setupAccount() {
     try { await fetch('/logout', { method: 'POST', headers: { 'X-CSRF-Token': csrfToken() } }); } catch { /* tetap ke halaman login */ }
     location.href = '/login';
   };
+  applyRole();
   getMe().then((m) => {
     $('#me-name').textContent = m.user;
     $('#me-role').textContent = ROLE_LABEL[m.role] || m.role || 'Admin';

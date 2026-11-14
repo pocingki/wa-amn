@@ -32,6 +32,7 @@ function setup(over = {}) {
     emit: (t, p) => log.emits.push([t, p]),
     now: () => 5000,
     mediaTimeoutMs: 50,
+    retryDelaysMs: [], // tes lama: tanpa percobaan ulang otomatis
     ...(over.deps || {}),
   };
   const f = createWhatsApp(deps);
