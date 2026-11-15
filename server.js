@@ -76,6 +76,10 @@ if (process.env.DISABLE_WA !== '1') {
   }
 }
 
+// Webhook Convia hanya aktif di mode convia (selain itu 404). Mode convia yang belum lengkap tetap
+// mendaftarkan rute dan menjawab 503 dari handler, supaya kegagalan konfigurasi terlihat jelas.
+const conviaWebhookOn = waMod?.mode === 'convia' && typeof waMod.handleWebhook === 'function';
+
 await initRoutes();
 
 const envFile = process.env.ENV_FILE ? path.resolve(process.env.ENV_FILE) : path.join(ROOT, '.env');
@@ -122,6 +126,62 @@ function setSecurityHeaders(req, res) {
   res.setHeader('Referrer-Policy', 'no-referrer');
   res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), payment=(), usb=()');
   if (auth.isHttps(req)) res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+}
+
+// Webhook: body mentah (Buffer, byte asli) karena tanda tangan HMAC dihitung atas byte persis yang dikirim.
+const WEBHOOK_BODY_LIMIT = 1024 * 1024;
+const WEBHOOK_DRAIN_MAX = 8 * 1024 * 1024; // sisa body yang masih dibuang agar klien sempat membaca 413
+
+function readRawBuffer(req, limit) {
+  return new Promise((resolve, reject) => {
+    const tooBig = () => new HttpError(413, 'Data terlalu besar (maks 1 MB)');
+    if (Number(req.headers['content-length']) > limit) {
+      req.resume();
+      return reject(tooBig());
+    }
+    let size = 0;
+    let over = false;
+    let chunks = [];
+    req.on('data', (c) => {
+      size += c.length;
+      if (size > limit) {
+        over = true;
+        chunks = [];
+      } else if (!over) chunks.push(c);
+      if (size > WEBHOOK_DRAIN_MAX) reject(tooBig());
+    });
+    req.on('end', () => (over ? reject(tooBig()) : resolve(Buffer.concat(chunks))));
+    req.on('error', reject);
+    req.on('close', () => reject(new Error('koneksi ditutup sebelum body selesai')));
+  });
+}
+
+// Header diberikan dengan pencarian tanpa membedakan huruf besar/kecil (Node memberi kunci huruf kecil;
+// penerima boleh menulis 'X-Convia-Signature').
+const caseInsensitiveHeaders = (h) =>
+  new Proxy(h, {
+    get: (t, k) => (typeof k === 'string' ? t[k.toLowerCase()] : t[k]),
+    has: (t, k) => (typeof k === 'string' ? k.toLowerCase() in t : k in t),
+  });
+
+// POST /webhooks/convia: tanpa sesi/CSRF/rate-limit login (dilindungi tanda tangan HMAC di provider).
+// Body dan header TIDAK dicatat ke log. URL HTTPS publik disediakan reverse proxy/tunnel; BIND_HOST tidak diubah.
+async function handleConviaWebhook(req, res) {
+  if (req.method !== 'POST') {
+    res.setHeader('Allow', 'POST');
+    return sendJSON(res, 405, { error: 'Metode tidak diizinkan' });
+  }
+  const raw = await readRawBuffer(req, WEBHOOK_BODY_LIMIT); // 413 ditangani sendError
+  let out;
+  try {
+    out = await waMod.handleWebhook(raw, caseInsensitiveHeaders(req.headers));
+  } catch (err) {
+    console.error(`[convia] webhook gagal diproses (${err?.name || 'Error'})`); // sengaja tanpa pesan galat/body/header
+    return sendJSON(res, 500, { error: 'Gagal memproses webhook' });
+  }
+  const status = Number(out?.status);
+  if (!Number.isInteger(status) || status < 100 || status > 599) return sendJSON(res, 500, { error: 'Gagal memproses webhook' });
+  return sendJSON(res, status, out?.body ?? {});
 }
 
 function sendJSON(res, code, body) {
@@ -276,6 +336,11 @@ async function handle(req, res) {
   }
   if (p === '/logout' && req.method === 'POST') return await handleLogout(req, res, ip);
   if (req.method === 'GET' && isPublicAsset(p)) return serveStatic(req, res, p);
+
+  if (p === '/webhooks/convia') {
+    if (!conviaWebhookOn) return sendJSON(res, 404, { error: 'endpoint tidak ditemukan' });
+    return await handleConviaWebhook(req, res);
+  }
 
   if (p.startsWith('/api/v1/')) return await handleV1(req, res, url, ip);
 

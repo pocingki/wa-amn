@@ -166,5 +166,124 @@ export function createWhatsApp(deps = {}) {
   };
 }
 
-const inst = createWhatsApp();
-export const { wa, start, stop, logout, sendText, handleMessage, getAdapter } = inst;
+// ---------------------------------------------------------------- Pemilih provider (baileys | convia)
+// Mode: env WA_PROVIDER menang atas settings.waProvider; keduanya kosong -> 'baileys'.
+// Mode 'convia' dengan konfigurasi tidak lengkap GAGAL TEGAS (status 'misconfigured'), tidak jatuh diam-diam ke Baileys.
+// Jaringan: server mendengarkan BIND_HOST (default 127.0.0.1). Webhook Convia butuh URL HTTPS publik lewat
+// reverse proxy/tunnel yang meneruskan ke POST /webhooks/convia (BIND_HOST sengaja tidak diubah).
+
+const MODES = ['baileys', 'convia'];
+const clean = (v) => String(v ?? '').trim();
+
+/** Tentukan mode. Nilai tak dikenal -> mode 'invalid' (gagal tegas), nilainya tidak dicetak. */
+export function resolveProviderMode({ env = process.env, getSettings = () => settingsMod.get() } = {}) {
+  let raw = clean(env.WA_PROVIDER).toLowerCase();
+  let source = 'env';
+  if (!raw) {
+    source = 'setting';
+    try { raw = clean(getSettings()?.waProvider).toLowerCase(); } catch { raw = ''; }
+  }
+  if (!raw) return { mode: 'baileys', source: 'default' };
+  if (MODES.includes(raw)) return { mode: raw, source };
+  const where = source === 'env' ? 'WA_PROVIDER' : 'setting waProvider';
+  return { mode: 'invalid', source, error: `Nilai provider WhatsApp tidak dikenal (${where}). Pakai 'baileys' atau 'convia'.` };
+}
+
+/** Baca konfigurasi Convia dari env. `missing` hanya berisi NAMA env, tidak pernah nilainya. */
+export function conviaConfigFromEnv(env = process.env) {
+  const apiKey = clean(env.CONVIA_API_KEY);
+  const webhookSecret = clean(env.CONVIA_WEBHOOK_SECRET) || clean(env.CONVIA_SIGNING_SECRET); // alias diterima
+  const missing = [];
+  if (!apiKey) missing.push('CONVIA_API_KEY');
+  if (!webhookSecret) missing.push('CONVIA_WEBHOOK_SECRET (atau CONVIA_SIGNING_SECRET)');
+  const config = { apiKey, webhookSecret };
+  const phoneNumberId = clean(env.CONVIA_PHONE_NUMBER_ID);
+  if (phoneNumberId) config.phoneNumberId = phoneNumberId;
+  const baseUrl = clean(env.CONVIA_BASE_URL);
+  if (baseUrl) config.baseUrl = baseUrl; // kosong -> biarkan default milik provider
+  return { ok: missing.length === 0, missing, config };
+}
+
+// Fasad untuk mode yang tidak bisa jalan: status 'misconfigured', pesan jelas, tidak melempar saat start/logout.
+function misconfiguredFacade(mode, message, now) {
+  const wa = { status: 'misconfigured', qr: null, number: null, error: message, since: now(), reconnectAttempts: 0 };
+  return {
+    wa,
+    start: async () => { console.error('[wa]', message); },
+    stop: async () => {},
+    logout: async () => ({ message }),
+    sendText: async () => { throw new Error(message); },
+    handleMessage: async () => {},
+    getAdapter: () => null,
+    handleWebhook: async () => ({ status: 503, body: { error: 'Provider WhatsApp belum dikonfigurasi' } }), // ASUMSI: Convia boleh mengirim ulang
+    provider: null,
+    mode,
+  };
+}
+
+/**
+ * Rakit fasad sesuai mode. Semua dependensi bisa diinjeksi (tes memakai provider palsu).
+ * Mode 'baileys' memakai createWhatsApp() apa adanya; perilakunya tidak berubah.
+ */
+export function createWhatsAppFacade({
+  env = process.env,
+  getSettings,
+  createWa = createWhatsApp,
+  createConviaProvider = null,
+  conviaLoadError = null,
+  now = Date.now,
+} = {}) {
+  const sel = resolveProviderMode({ env, ...(getSettings ? { getSettings } : {}) });
+
+  if (sel.mode === 'baileys') {
+    return {
+      ...createWa(),
+      handleWebhook: async () => ({ status: 404, body: { error: 'Tidak ditemukan' } }), // webhook hanya ada di mode convia
+      provider: null,
+      mode: 'baileys',
+    };
+  }
+  if (sel.mode === 'invalid') return misconfiguredFacade('invalid', sel.error, now);
+
+  const cfg = conviaConfigFromEnv(env);
+  if (!cfg.ok) {
+    return misconfiguredFacade('convia', `Mode Convia butuh env: ${cfg.missing.join(', ')}. Lengkapi lalu restart; tidak beralih ke Baileys.`, now);
+  }
+  if (conviaLoadError || typeof createConviaProvider !== 'function') {
+    return misconfiguredFacade('convia', 'Modul provider Convia (src/wa-convia-provider.js) tidak bisa dimuat. Tidak beralih ke Baileys.', now);
+  }
+  let provider;
+  try {
+    provider = createConviaProvider(cfg.config);
+  } catch (e) {
+    console.error('[wa] provider Convia gagal dibuat:', e?.code || e?.name || 'Error'); // tanpa pesan galat: bisa memuat nilai konfigurasi
+    return misconfiguredFacade('convia', 'Provider Convia gagal dibuat dari konfigurasi env. Periksa nilai CONVIA_*. Tidak beralih ke Baileys.', now);
+  }
+  return {
+    wa: provider.wa,
+    start: () => provider.start(),
+    stop: () => provider.stop(),
+    logout: () => provider.logout(),
+    sendText: (jid, text) => provider.sendText(jid, text),
+    handleMessage: async () => {}, // khusus Baileys; di Convia pesan masuk lewat handleWebhook
+    getAdapter: () => provider.getAdapter(),
+    handleWebhook: (rawBody, headers) => provider.handleWebhook(rawBody, headers),
+    provider,
+    mode: 'convia',
+  };
+}
+
+// Modul provider Convia dimuat hanya bila mode convia dan env lengkap, supaya mode baileys tidak bergantung padanya.
+let conviaFactory = null;
+let conviaLoadError = null;
+if (resolveProviderMode().mode === 'convia' && conviaConfigFromEnv().ok) {
+  try {
+    ({ createConviaProvider: conviaFactory } = await import('./wa-convia-provider.js'));
+  } catch (e) {
+    conviaLoadError = e;
+    console.error('[wa] modul provider Convia gagal dimuat:', e?.code || e?.name || 'Error');
+  }
+}
+
+const inst = createWhatsAppFacade({ createConviaProvider: conviaFactory, conviaLoadError });
+export const { wa, start, stop, logout, sendText, handleMessage, getAdapter, handleWebhook, provider, mode } = inst;

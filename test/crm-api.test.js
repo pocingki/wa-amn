@@ -567,3 +567,16 @@ test('send-to-acesio: penyimpanan status gagal setelah Acesio menerima -> 200 + 
     assert.equal(fa.seen.length, 1);
   } finally { await fa.close(); clearAce(); }
 });
+
+test('send-to-acesio: lead tanpa nomor telepon (hanya LID/BSUID) -> 400, tidak ada panggilan keluar', async () => {
+  reset();
+  const fa = await fakeAcesio(() => [201, {}]);
+  process.env.ACESIO_URL = fa.url; process.env.ACESIO_BOT_KEY = 'k';
+  try {
+    const hot = mk({ status: 'Hot Leads', hotStage: 'Won', phone: '', lid: 'US.1349120865' });
+    const r = await call('POST', `/api/leads/${hot.id}/send-to-acesio`, { body: {} });
+    assert.equal(r.status, 400);
+    assert.match(r.json.error, /Nomor telepon customer belum diketahui/);
+    assert.equal(fa.seen.length, 0);
+  } finally { await fa.close(); clearAce(); }
+});

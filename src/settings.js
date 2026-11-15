@@ -8,6 +8,8 @@ const OPENING_LAMA = 'Halo {nama}, selamat datang. Saya {bot}, asisten virtual y
 const MASK = '••••';
 const HISTORY_MAX = 20;
 const FIELD_TYPES = ['text', 'name', 'phone', 'date', 'choice'];
+export const WA_PROVIDERS = ['baileys', 'convia'];
+export const CONVIA_WEBHOOK_PATH = '/webhooks/convia';
 
 export const DEFAULTS = {
   // Nama/tagline awal untuk instance baru: diisi dari .env (BRAND_NAME, BRAND_TAGLINE). Setelah
@@ -17,6 +19,9 @@ export const DEFAULTS = {
   // Warna utama brand (#RRGGBB). Kosong = palet biru bawaan. Dari .env: BRAND_COLOR (hanya nilai awal).
   brandColor: normalizeHex(process.env.BRAND_COLOR) && !checkBase(process.env.BRAND_COLOR) ? normalizeHex(process.env.BRAND_COLOR) : '',
   botEnabled: true,
+  // Koneksi WhatsApp: 'baileys' (scan QR, bawaan) | 'convia' (API resmi). Env WA_PROVIDER, bila diisi, menang.
+  // Perubahan baru berlaku setelah server di-restart.
+  waProvider: 'baileys',
   botName: 'Asisten Virtual',
   adminName: 'Admin',
   openingMessage: 'Halo {nama}, selamat datang. Saya {bot}, yang membantu {admin} menjawab pesan Anda. Ada yang bisa kami bantu?',
@@ -141,6 +146,13 @@ function clean(p, base) {
       o.brandColor = normalizeHex(raw);
     }
   }
+  if ('waProvider' in p) {
+    // enum ketat: hanya string persis 'baileys' | 'convia' (nilai lain ditolak, bukan diam-diam diganti)
+    if (typeof p.waProvider !== 'string' || !WA_PROVIDERS.includes(p.waProvider.trim())) {
+      throw err('VALIDATION', "Koneksi WhatsApp tidak valid: pilih 'baileys' atau 'convia'.");
+    }
+    o.waProvider = p.waProvider.trim();
+  }
   for (const k of ['openingMessage', 'fallbackMessage', 'handoverMessage', 'completionMessage']) if (k in p) o[k] = str(p[k], 2000);
   for (const k of ['botEnabled', 'autoTakeoverOnPhoneReply']) if (k in p) o[k] = !!p[k];
   for (const [k, min, max] of [['botDurationMinutes', 0, 10080], ['adminAutoReturnMinutes', 0, 10080], ['staleMinutes', 1, 1440], ['fallbackCooldownMinutes', 0, 1440], ['sendRateLimitPerMinute', 1, 120], ['maxMediaMB', 1, 64], ['retentionDays', 0, 3650]]) {
@@ -213,6 +225,7 @@ function normalize(saved) {
     type: FIELD_TYPES.includes(f.type) ? f.type : f.id === 'nama' ? 'name' : 'text',
     options: Array.isArray(f.options) ? f.options : [],
   }));
+  if (!WA_PROVIDERS.includes(s.waProvider)) s.waProvider = DEFAULTS.waProvider; // berkas lama/rusak -> bawaan
   s.version = Number.isInteger(saved.version) && saved.version >= 1 ? saved.version : 1;
   return s;
 }
@@ -259,10 +272,26 @@ export function restore(version, { by = '' } = {}) {
   return apply(patch, by);
 }
 
-// Salinan aman untuk klien: token Telegram dimasking.
+// Info Convia untuk klien: HANYA boolean/alamat publik, tidak pernah nilai key atau secret.
+// Env dibaca saat dipanggil (bukan saat impor) supaya perubahan .env + restart dan tes konsisten.
+function conviaInfo() {
+  const env = (k) => String(process.env[k] ?? '').trim();
+  const publicUrl = env('PUBLIC_URL').replace(/\/+$/, '');
+  const override = env('WA_PROVIDER').toLowerCase();
+  return {
+    configured: !!env('CONVIA_API_KEY') && !!(env('CONVIA_WEBHOOK_SECRET') || env('CONVIA_SIGNING_SECRET')),
+    webhookPath: CONVIA_WEBHOOK_PATH,
+    publicUrl: /^https?:\/\//i.test(publicUrl) ? publicUrl : '', // bukan rahasia; kosong bila bukan http(s)
+    envOverride: WA_PROVIDERS.includes(override) ? override : '', // WA_PROVIDER di .env mengalahkan pengaturan ini
+  };
+}
+
+// Salinan aman untuk klien: token Telegram dimasking; status Convia hanya boolean.
 export function publicView(S) {
   const v = structuredClone(S);
   const t = v.notify?.telegramBotToken;
   if (v.notify) v.notify.telegramBotToken = t ? MASK + String(t).slice(-4) : '';
+  v.waProvider = WA_PROVIDERS.includes(v.waProvider) ? v.waProvider : DEFAULTS.waProvider;
+  v.convia = conviaInfo();
   return v;
 }

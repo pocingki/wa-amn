@@ -58,3 +58,28 @@ WhatsApp nyata dan Acesio nyata: **BLOCKED** (tanpa akses jaringan/kredensial/no
 2. Kerjakan F-01 (seen setelah proses sukses) dengan tes.
 3. Perbaiki menu mobile (F-16) dan sembunyikan menu Integrasi untuk agent (F-15).
 4. Uji end-to-end dengan nomor uji dan Acesio nyata.
+
+## Opsi API Resmi (Convia) (15 Nov 2026)
+Alternatif dari Baileys lewat WhatsApp Business API resmi (Convia). Bawaan tetap Baileys; tidak berubah bila tidak diaktifkan. Menjawab sebagian F-02 (jalur resmi kini ada, tetapi **baru teruji MOCK**).
+
+- **Aktivasi:** `WA_PROVIDER=convia` (env, mengalahkan pengaturan) atau Pengaturan > koneksi WhatsApp > "API Resmi (Convia)" lalu restart. Env: `CONVIA_API_KEY`, `CONVIA_WEBHOOK_SECRET` (alias `CONVIA_SIGNING_SECRET`), opsional `CONVIA_BASE_URL`, `CONVIA_PHONE_NUMBER_ID`. Tanpa key/secret: status `misconfigured`, tidak jatuh ke Baileys.
+- **Webhook:** `POST /webhooks/convia` (tanpa sesi/CSRF, dilindungi HMAC-SHA256 atas body asli). Dua format: A (`event`, header `X-Webhook-Signature`) dan B (`eventType`, header `X-Convia-Signature`); format dideteksi dari isi body.
+- **Modul:** `src/wa-convia-api.js`, `wa-convia-webhook.js` (A), `wa-convia-events.js` (B), `wa-convia-webhook-compat.js`, `wa-convia-inbound.js`, `wa-convia-provider.js`; pemilih di `src/whatsapp.js`; setting `waProvider` di `src/settings.js`; rute di `server.js`.
+- **Bukti:** `test/convia-e2e.test.js` (21 tes, server Convia palsu + server asli), seluruh `npm test` 506/506, lint bersih. Semua MOCK. Uji REAL **BLOCKED** (butuh API key, secret webhook, URL publik, nomor uji). Lihat `docs/E2E-CONVIA.md` (tabel, runbook, temuan) dan `docs/INTEGRASI-CONVIA.md` (cara pasang, batas, biaya).
+- **Tidak didukung:** template (di luar jendela 24 jam balasan gagal dan ditandai perlu perhatian), media keluar, pengiriman otomatis template.
+
+### Sisa risiko Convia
+| Risiko | Tingkat | Catatan |
+|---|---|---|
+| Perilaku retry dan duplikasi webhook Convia belum terdokumentasi (apakah 5xx memicu kirim ulang, apakah event bisa ganda, urutan) | HIGH | Dedupe memakai `convia:<message_id>` dan teruji MOCK; perilaku nyata belum diketahui |
+| Format header tanda tangan hanya diasumsikan hex polos; format mana (A/B) yang dipakai akun belum pasti | HIGH | Salah asumsi = semua webhook 401 (aman, tetapi tidak ada pesan masuk). Pastikan lewat uji REAL |
+| Kuota Starter 1.000 request/hari vs health check tiap 60 detik (sekitar 1.440/hari) | MEDIUM | Belum diketahui apakah `/health` dihitung; interval belum bisa diatur lewat env |
+| Biaya: Rp 25 per event terkirim (menurut brief); biaya template dan apa saja yang dihitung belum jelas | MEDIUM | Konfirmasi dengan Convia dan pantau tagihan awal |
+| Template belum didukung: di luar jendela 24 jam balasan tidak terkirim | MEDIUM | Admin harus menunggu pelanggan menulis lagi |
+| Format B hanya menangani `message.received` (tanpa `app_sent` dan status); non-teks belum diketahui bentuknya | MEDIUM | Lengkapi setelah payload nyata terlihat |
+| BSUID: balasan ke pengguna tanpa nomor belum terbukti diterima Convia; kirim ke Acesio ditolak 400 sampai nomor diisi | LOW | Lead tetap tercatat |
+| Body bukan JSON atau bentuk tak dikenal dijawab 401, bukan 400 | LOW | Aman; membingungkan saat diagnosa (temuan 1 di `docs/E2E-CONVIA.md`) |
+| `.env.example` dan `env.example` ganda | LOW | Gabungkan |
+
+### File berubah (sesi S7)
+`test/convia-e2e.test.js` (baru), `docs/INTEGRASI-CONVIA.md` (baru), `docs/E2E-CONVIA.md` (baru), `.env.example` (blok Convia), `PROJECT_STATUS.md` (bagian ini).
