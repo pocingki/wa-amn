@@ -14,7 +14,8 @@ process.env.AMNAN_NO_BG = '1';
 process.env.AMNAN_NO_BACKUP = '1';
 const C = await import('../src/connect.js');
 const D = await import('../src/db.js');
-process.on('exit', () => fs.rmSync(dir, { recursive: true, force: true }));
+// Windows tidak bisa menghapus berkas SQLite yang masih terbuka (EPERM); folder sementara boleh tersisa.
+process.on('exit', () => { try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* dibiarkan */ } });
 
 const opt = (body, endpoint = 'POST /api/v1/messages') => ({ endpoint, fingerprint: C.requestFingerprint('POST', '/api/v1/messages', body) });
 const rows = () => D.getDb().prepare('SELECT * FROM idempotency_keys').all();
