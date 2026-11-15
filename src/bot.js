@@ -3,7 +3,6 @@ import * as settingsStore from './settings.js';
 import { remainingMs } from './bot-plan.js';
 
 export { fill, remainingMs, adminReturnMs, setMode, decide } from './bot-plan.js';
-export { matchIntent } from './bot-intent.js';
 export { normPhone } from './bot-validate.js';
 export { handleIncoming, onStatusUpdate, resendMessage } from './bot-pipeline.js';
 export { testerView, testerSend, testerReset, testerMode, testerAdvance, testerPhoneReply, testerTransactionDone } from './bot-tester.js';

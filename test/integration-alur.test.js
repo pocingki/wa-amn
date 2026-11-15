@@ -42,10 +42,12 @@ test('status hanya naik: Hot tidak turun oleh pesan biasa berikutnya', async () 
   assert.equal(after.json.lead.status, 'Hot Leads');
 });
 
-test('lebih dari 10 pesan customer -> Warm', async () => {
+test('banyak pesan customer + 1 data terisi (referensi) -> Warm', async () => {
+  // Skor Warm: 4 poin dari >= 12 pesan + 1 poin dari satu kolom data (referensi) = batas 5.
+  // Data wajib kini hanya satu butir (referensi), jadi 11 pesan saja (3 + 1 = 4) belum cukup.
   const p = '628120000004';
   let last;
-  for (let i = 1; i <= 11; i++) last = await send(p, i === 1 ? 'Halo kak dari Instagram' : `pertanyaan nomor ${i}`);
+  for (let i = 1; i <= 12; i++) last = await send(p, i === 1 ? 'Halo kak dari Instagram' : `pertanyaan nomor ${i}`);
   assert.equal(last.json.lead.status, 'Warm Leads');
 });
 

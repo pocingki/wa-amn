@@ -1,5 +1,6 @@
-// Uji fasad bot, mesin balasan (decide) dan Bot Tester. Perilaku baru: serah terima saat durasi habis,
-// fallback ber-cooldown, balasan lewat jalur pipeline yang sama dengan WhatsApp asli.
+// Uji fasad bot, mesin balasan (decide) dan Bot Tester. Intent diganti balasan AI (ditandai needsAi oleh plan,
+// diselesaikan pipeline/B6); tanpa AI bot memakai fallback ber-cooldown. Satu pertanyaan data wajib: referensi.
+// Balasan lewat jalur pipeline yang sama dengan WhatsApp asli.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -18,12 +19,8 @@ const C = await import('../src/conversations.js');
 const S = {
   botEnabled: true, botName: 'Sari', adminName: 'Dewi', openingMessage: 'Halo {nama}, saya {bot}.',
   fallbackMessage: 'Admin akan segera membalas.', handoverMessage: 'Dilanjutkan {admin}.', completionMessage: 'Terima kasih.',
-  botDurationMinutes: 0, staleMinutes: 10, fallbackCooldownMinutes: 30, autoTakeoverOnPhoneReply: true, slangMap: {},
-  intents: [{ id: 'harga', keywords: ['harga'], response: 'Info harga ya.', active: true }],
-  requiredFields: [
-    { id: 'nama', label: 'Nama', question: 'Boleh tahu nama Anda?', enabled: true, type: 'name' },
-    { id: 'kebutuhan', label: 'Kebutuhan', question: 'Apa kebutuhan Anda?', enabled: true, type: 'text' },
-  ],
+  botDurationMinutes: 0, staleMinutes: 10, fallbackCooldownMinutes: 30, autoTakeoverOnPhoneReply: true,
+  requiredFields: [{ id: 'referensi', label: 'Referensi', question: 'Boleh tahu, Kakak mengetahui kami dari mana?', enabled: true, type: 'text' }],
 };
 let cur = S; // pengaturan tester bisa diganti per tes
 const tester = () => createTester({ settings: { get: () => cur } });
@@ -31,9 +28,10 @@ const mkConv = (name = 'Budi') => C.newConv('628111', '628111@s.whatsapp.net', n
 const A = '6281200000001';
 
 test('fasad mengekspor semua nama', () => {
-  for (const n of ['fill', 'remainingMs', 'setMode', 'decide', 'matchIntent', 'normPhone', 'handleIncoming', 'onStatusUpdate', 'resendMessage',
+  for (const n of ['fill', 'remainingMs', 'setMode', 'decide', 'normPhone', 'handleIncoming', 'onStatusUpdate', 'resendMessage',
     'testerView', 'testerSend', 'testerReset', 'testerMode', 'testerAdvance', 'testerPhoneReply', 'testerTransactionDone', 'view'])
     assert.equal(typeof bot[n], 'function', n);
+  assert.equal(bot.matchIntent, undefined); // intent sudah dihapus dari fasad
   assert.equal(bot.normPhone('0812-0000-0003'), '6281200000003');
   assert.equal(bot.normPhone('12'), null);
 });
@@ -43,21 +41,29 @@ test('view: awaitingReply dan remainingMs', () => {
   C.addMessage(c, 'bot', 'ya');
   assert.equal(bot.view(c).awaitingReply, false);
 });
-test('decide: pembuka + intent + pertanyaan; jawaban nama; penutup', () => {
+test('decide: pembuka + pertanyaan referensi (tanpa AI, fallback ditahan); jawaban referensi; penutup sekali', () => {
   const c = mkConv();
   const r = bot.decide(c, 'Halo, berapa harga?', S, 2000);
-  assert.deepEqual(r, ['Halo Budi, saya Sari.', 'Info harga ya.', 'Boleh tahu nama Anda?']);
-  assert.deepEqual(bot.decide(c, 'Andi', S, 3000), ['Apa kebutuhan Anda?']);
-  assert.equal(c.name, 'Andi');
-  assert.deepEqual(bot.decide(c, 'lewati', S, 4000), ['Terima kasih.']); // penutup hanya sekali
+  assert.deepEqual(r, ['Halo Budi, saya Sari.', 'Boleh tahu, Kakak mengetahui kami dari mana?']);
+  assert.deepEqual(bot.decide(c, 'Instagram', S, 3000), ['Terima kasih.']);
+  assert.equal(c.data.referensi, 'Instagram');
+  // referensi sudah dijawab: tidak ditanya lagi, penutup tidak berulang; fallback ber-cooldown tetap jalan
+  assert.deepEqual(bot.decide(c, 'xyz', S, 1_700_000_000_000), ['Admin akan segera membalas.']);
 });
-test('durasi habis -> pembuka ulang, durasi dihitung ulang, mode tetap bot', () => {
+test('decide: balasan AI (needsAi) dilewati dan tidak mengubah state keluaran', () => {
+  const c = mkConv(); c.openingSent = true;
+  const s = { ...S, ai: { enabled: true } };
+  assert.deepEqual(bot.decide(c, 'Berapa harganya?', s, 2000), ['Boleh tahu, Kakak mengetahui kami dari mana?']);
+  assert.ok(!c.lastFallbackAt); // commit AI baru dijalankan pipeline setelah balasan terkirim
+});
+test('durasi habis -> sesi baru: durasi dihitung ulang, mode tetap bot, pembuka ulang hanya untuk salam', () => {
   const c = mkConv(); c.openingSent = true;
   const s = { ...S, botDurationMinutes: 5 };
   assert.equal(bot.remainingMs(c, s, 1000 + 60000), 4 * 60000);
-  const r = bot.decide(c, 'halo', s, 1000 + 6 * 60000);
-  assert.match(r[0], /^Halo/); assert.equal(c.mode, 'bot');
+  const r = bot.decide(c, 'xyz', s, 1000 + 6 * 60000);
+  assert.ok(r.every((t) => !/^Halo/.test(t))); assert.equal(c.mode, 'bot');
   assert.equal(bot.remainingMs(c, s, 1000 + 7 * 60000), 4 * 60000);
+  assert.match(bot.decide(c, 'halo', s, 1000 + 7 * 60000)[0], /^Halo/); // salam dari nomor lama -> pembuka
 });
 test('fallback ber-cooldown dan bot nonaktif', () => {
   const c = mkConv(); c.openingSent = true;
@@ -90,24 +96,26 @@ test('tester: phone-reply -> takeover, bot diam setelahnya', async () => {
   assert.ok(t.testerView(A).messages.some((m) => m.by === 'system' && /Bot dinonaktifkan/.test(m.text)));
   assert.equal((await t.testerSend(A, 'ada promo?')).replies.length, 0);
 });
-test('tester: durasi habis lewat jam simulasi -> pembuka ulang; nomor terpisah; tidak menyentuh CRM asli', async () => {
+test('tester: durasi habis lewat jam simulasi -> tanpa pembuka ulang (kecuali salam); nomor terpisah; tidak menyentuh CRM asli', async () => {
   cur = { ...S, botDurationMinutes: 5 };
   const t = tester();
   await t.testerSend(A, 'Halo dari Instagram');
   t.testerAdvance(A, 1);
+  const r0 = await t.testerSend(A, 'ada promo?');
+  assert.ok(r0.replies.every((m) => !/^Halo/.test(m.text))); assert.equal(r0.status.mode, 'bot');
   const r = await t.testerSend(A, 'halo lagi');
   assert.match(r.replies[0].text, /^Halo/); assert.equal(r.status.mode, 'bot');
   assert.equal(t.testerView('6281200000009').status.mode, 'bot');
   assert.equal(C.get(A), undefined);
   t.testerReset(); assert.equal(t.testerView(A).numbers.length, 0);
 });
-test('tester: lead virtual dari platform; jawaban nama menyinkronkan lead', async () => {
+test('tester: lead virtual dari platform; jawaban referensi tersimpan di data percakapan', async () => {
   cur = S;
   const t = tester();
   const a = await t.testerSend(A, 'Halo dari TikTok, tanya harga');
   assert.equal(a.lead.platform, 'TikTok'); assert.equal(a.lead.status, 'Cold Leads');
-  const b = await t.testerSend(A, 'Andi');
-  assert.equal(b.lead.name, 'Andi'); assert.equal(b.data.nama, 'Andi');
+  const b = await t.testerSend(A, 'Teman');
+  assert.equal(b.data.referensi, 'Teman');
   assert.equal(t.testerView(A).leads.length, 1);
 });
 test('tester: admin membalas dari HP lalu diam > batas -> bot aktif kembali (jam simulasi)', async () => {

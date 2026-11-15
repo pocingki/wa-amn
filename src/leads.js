@@ -40,6 +40,17 @@ const MEDIA_KINDS = new Set(['image', 'document', 'video']);
 const IGNORED_KINDS = new Set(['reaction', 'system']);
 const DAY_MS = 86400000;
 
+// ---------- nama WhatsApp (pushName) ----------
+/** pushName -> teks bersih: spasi dan baris baru dirapikan jadi satu spasi, 2-100 karakter; '' bila tidak valid. */
+export function cleanWaName(raw) {
+  if (typeof raw !== 'string') return '';
+  const s = raw.replace(/[\p{Cc}\s]+/gu, ' ').trim();
+  const n = Array.from(s).length;
+  return n >= 2 && n <= 100 ? s : '';
+}
+/** Nama kosong atau placeholder 'Tanpa Nama' boleh diisi otomatis dari nama WhatsApp. */
+export const isBlankName = (v) => { const s = String(v ?? '').trim(); return !s || /^tanpa nama$/i.test(s); };
+
 const R = {
   cold: 'Pesan masuk pertama kali dari nomor ini (sama dengan pesan pembuka bot)',
   warmScore: (s, th, reasons) => `Skor Warm ${s} (batas ${th}): ${reasons.join(', ')}`,
@@ -346,6 +357,7 @@ export function classify(prev, msg = {}, config = getConfig()) {
   const { phone = null, lid = null, name = '', ts = Date.now(), customerCount = 1, kind = 'text', source = null } = msg;
   const ignoredResult = { created: false, ignored: true, lead: null, changes: [] };
   if (IGNORED_KINDS.has(kind)) return ignoredResult;
+  const waName = cleanWaName(name); // nama WhatsApp bersih; '' bila tidak valid
   const text = String(msg.text ?? '');
   const S = settings(config);
   const det = detect(text, config, source);
@@ -366,7 +378,7 @@ export function classify(prev, msg = {}, config = getConfig()) {
       : warm ? (useScore ? R.warmScore(w.score, ws.threshold, w.reasons) : R.warmLegacy(count, warmAfter)) : R.cold;
     const cycles = sig.signals.length ? applySignals([], sig.signals, ts, S) : [];
     const lead = {
-      phone: phone || null, lid: lid || null, name: name || '', platform: det.platform, keyword: keywords.join(', '), firstMessage: text,
+      phone: phone || null, lid: lid || null, name: waName, waName, platform: det.platform, keyword: keywords.join(', '), firstMessage: text,
       source: normSource(source),
       status, statusReason, statusHistory: [{ status, ts, reason: statusReason }],
       dataType: 'New', dataReason: R.new,
@@ -432,7 +444,10 @@ export function classify(prev, msg = {}, config = getConfig()) {
     const cur = lead.source;
     for (const [k, v] of Object.entries(source)) if (v && !cur[k]) cur[k] = v;
   }
-  if (name && !lead.name) lead.name = name;
+  if (waName) {
+    lead.waName = waName; // pushName terbaru
+    if (isBlankName(lead.name)) lead.name = waName; // hanya mengisi yang kosong/'Tanpa Nama'; nama yang ada tidak pernah ditimpa
+  }
   if (phone && !lead.phone) lead.phone = phone;
   if (lid && !lead.lid) lead.lid = lid;
   lead.messageCount = count;

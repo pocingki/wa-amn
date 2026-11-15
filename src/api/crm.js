@@ -12,6 +12,8 @@ const DEFAULT_TZ = 'Asia/Jakarta';
 const SORTS = ['createdAt', 'lastContactAt', 'name', 'status', 'platform'];
 const PERIODS = ['day', 'week', 'month', 'year'];
 const MAX_NOTES = 200;
+const REFERENSI_MAX = 50; // panjang maksimal referensi (juga dikirim sebagai platform ke Acesio)
+const KEYWORD_MAX = 100; // panjang maksimal keyword yang dikirim ke Acesio
 const SUB_ROUTE = /^\/api\/leads\/([\w-]+)(?:\/(notes|followup|transaction-done|send-to-acesio|block|unblock)(?:\/([\w-]+))?)?$/;
 
 const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
@@ -87,6 +89,38 @@ function periodRange(period, now, tz) {
   }
 }
 
+// ---------- nomor telepon ----------
+// SALINAN RINGKAS canonicalPhone: src/phone.js (sesi C1) belum ada saat sesi ini dikerjakan.
+// Setelah C1 digabung, ganti fungsi ini dengan impor dari '../phone.js' (cek bentuk keluarannya dulu).
+// Aturan: hanya angka; awalan 00 dibuang; awalan 0 lokal -> 62; "620..." -> "62..."; 8-15 angka, selain itu ''.
+function canonPhone(raw) {
+  let d = String(raw ?? '').replace(/\D/g, '');
+  if (d.startsWith('00')) d = d.slice(2);
+  if (d.startsWith('0')) d = '62' + d.slice(1);
+  else if (d.startsWith('620')) d = '62' + d.slice(3);
+  return d.length >= 8 && d.length <= 15 ? d : '';
+}
+
+// ---------- kesiapan kirim ke Acesio ----------
+const placeholderName = (v) => { const t = String(v ?? '').trim(); return !t || /^tanpa nama$/i.test(t); };
+
+/** Eligible = Hot Leads tahap Won. missing: 'phone' | 'referensi' | 'name'. Murni; tidak mengubah lead. */
+export function acesioReadiness(lead) {
+  const l = isObj(lead) ? lead : {};
+  const eligible = l.status === 'Hot Leads' && l.hotStage === 'Won';
+  const missing = [];
+  if (!/\d/.test(String(l.phone ?? ''))) missing.push('phone'); // hanya LID/BSUID
+  if (!String(l.referensi ?? '').trim()) missing.push('referensi');
+  if (String(l.name ?? '').trim().length < 2 || placeholderName(l.name)) missing.push('name');
+  return { eligible, ready: eligible && missing.length === 0, missing };
+}
+
+const MISSING_TEXT = {
+  phone: 'Nomor telepon customer belum diketahui (hanya ID pengganti/LID). Isi nomor telepon di data customer',
+  referensi: 'Referensi (customer tahu dari mana) belum diisi',
+  name: 'Nama customer belum diisi',
+};
+
 // ---------- tampilan lead ----------
 /** Salinan lead dengan default terisi; lead lama tidak pernah menyebabkan error. */
 function norm(l) {
@@ -98,6 +132,8 @@ function norm(l) {
   n.hotCandidate = isObj(n.hotCandidate) ? n.hotCandidate : null;
   n.source = isObj(n.source) ? n.source : null;
   n.blocked = n.blocked === true;
+  n.waName = typeof n.waName === 'string' ? n.waName : '';
+  n.referensi = typeof n.referensi === 'string' ? n.referensi : '';
   // normalizeLead mengisi lastCustomerMessageAt dari lastMessageAt (lead lama); untuk "menunggu balasan" hanya nilai asli yang dipercaya.
   n.lastCustomerMessageAt = l.lastCustomerMessageAt ?? null;
   return n;
@@ -116,12 +152,12 @@ function derive(n, today) {
 function listItem(l, today) {
   const n = norm(l);
   const { notes, statusHistory, ...rest } = n;
-  return { ...rest, ...derive(n, today) };
+  return { ...rest, ...derive(n, today), acesioReadiness: acesioReadiness(n) };
 }
 
 const detailView = (l, today = dayKey(Date.now(), getTz())) => {
   const n = norm(l);
-  return { ...n, ...derive(n, today) };
+  return { ...n, ...derive(n, today), acesioReadiness: acesioReadiness(n) };
 };
 
 // ---------- query daftar ----------
@@ -232,7 +268,7 @@ function buildCSV(items, tz) {
     return [
       cell(l.name), cell(phone, !/^\+?\d+$/.test(phone)), cell(l.platform), cell(l.keyword), cell(l.status), cell(l.dataType),
       cell(stamp(l.createdAt, tz), false), cell(stamp(l.lastContactAt, tz), false), cell(fu, !/^\d{4}-/.test(fu)),
-      cell(Object.entries(l.data || {}).map(([k, v]) => `${labels[k] || k}: ${v}`).join('; ')), cell(notes),
+      cell(Object.entries(l.data || {}).map(([k, v]) => `${labels[k] || (k.charAt(0).toUpperCase() + k.slice(1))}: ${v}`).join('; ')), cell(notes),
     ].join(',');
   });
   return '\ufeff' + [head.map((h) => cell(h, false)).join(','), ...lines].join('\r\n') + '\r\n';
@@ -358,6 +394,19 @@ export async function handle(req, res, url, ctx) {
           if (k === 'platform' && !v) return fail(400, 'Sumber tidak boleh kosong');
           patch[k] = v; fields.push(k);
         }
+        if ('referensi' in b) {
+          if (typeof b.referensi !== 'string') return fail(400, 'Field referensi harus berupa teks');
+          const v = b.referensi.replace(/\s+/g, ' ').trim();
+          if (v.length > REFERENSI_MAX) return fail(400, `Referensi maksimal ${REFERENSI_MAX} karakter`);
+          patch.referensi = v; fields.push('referensi');
+        }
+        if ('phone' in b) {
+          if (typeof b.phone !== 'string' && typeof b.phone !== 'number') return fail(400, 'Field phone harus berupa teks atau angka');
+          const ph = canonPhone(b.phone);
+          if (!ph) return fail(400, 'Nomor telepon tidak valid (8-15 angka; boleh diawali 0 atau kode negara)');
+          if (store.all().some((x) => x.id !== id && x.phone === ph)) return fail(409, 'Nomor ini sudah dipakai lead lain');
+          patch.phone = ph; fields.push('phone');
+        }
         const reset = truthy(b.resetAuto), confirmHot = truthy(b.confirmHot);
         if (reset && confirmHot) return fail(400, 'resetAuto dan confirmHot tidak bisa dipakai bersamaan');
 
@@ -392,6 +441,14 @@ export async function handle(req, res, url, ctx) {
             if (hs !== null && !store.HOT_STAGES.includes(hs)) return fail(400, 'Tahap Hot Lead tidak valid');
             patch.hotStage = hs;
             fields.push('hotStage');
+            if (hs === 'Won') {
+              // nama kosong dipulihkan dari nama WhatsApp; nama yang sudah ada (termasuk hasil edit admin) tidak ditimpa
+              const wa = String(cur.waName ?? '').trim();
+              if (wa && placeholderName('name' in patch ? patch.name : cur.name)) {
+                patch.name = wa;
+                if (!fields.includes('name')) fields.push('name');
+              }
+            }
           }
         }
         if (!fields.length) return fail(400, 'Tidak ada field yang bisa diubah');
@@ -485,7 +542,11 @@ export async function handle(req, res, url, ctx) {
         return fail(400, 'Tingkatan Hot Lead harus sudah mencapai tahap Won untuk dikirim ke Acesio');
       }
 
-      if (!String(l.phone || '').replace(/\D/g, '')) return fail(400, 'Nomor telepon customer belum diketahui (hanya ID pengganti/LID). Isi nomor telepon di data customer sebelum dikirim ke Acesio');
+      const ready = acesioReadiness(l);
+      if (!ready.ready) {
+        const error = `Data customer belum lengkap untuk dikirim ke Acesio. ${ready.missing.map((k) => MISSING_TEXT[k]).join('. ')}.`;
+        return send(400, { error, missing: ready.missing });
+      }
       const acesioUrl = String(process.env.ACESIO_URL || 'http://127.0.0.1:3000').trim().replace(/\/+$/, '');
       const acesioKey = String(process.env.ACESIO_BOT_KEY || process.env.ACESIO_API_KEY || process.env.BOT_API_KEY || '').trim();
       if (!acesioKey) return fail(503, 'Integrasi Acesio belum dikonfigurasi: ACESIO_BOT_KEY belum diisi di .env');
@@ -494,10 +555,10 @@ export async function handle(req, res, url, ctx) {
       const cid = randomUUID(); // correlation ID: dikirim ke Acesio, dicatat di log, audit, dan respons
       const timeoutMs = Math.min(60000, Math.max(1000, Number(process.env.ACESIO_TIMEOUT_MS) || 10000));
       const payload = {
-        name: l.name || 'Tanpa Nama',
-        phone: l.phone || '',
-        platform: l.platform || 'WhatsApp',
-        keyword: l.keyword || '',
+        name: String(l.name).trim(),
+        phone: canonPhone(l.phone) || String(l.phone).replace(/\D/g, ''),
+        platform: String(l.referensi).trim().slice(0, REFERENSI_MAX), // apa adanya; normalisasi (mis. 'fb') urusan Acesio
+        keyword: String(l.keyword || '').slice(0, KEYWORD_MAX),
         note: [
           l.followUpNote ? `[Follow-up] ${l.followUpNote}` : '',
           l.firstMessage ? `[Pesan Awal] ${l.firstMessage}` : '',
@@ -518,7 +579,7 @@ export async function handle(req, res, url, ctx) {
         });
         const resJson = await resp.json().catch(() => ({}));
         out = resp.ok
-          ? { ok: true, http: resp.status, acesioId: resJson.id }
+          ? { ok: true, http: resp.status, acesioId: resJson.id, replayed: resJson.replayed === true }
           : { ok: false, http: resp.status, kind: 'rejected', error: `HTTP ${resp.status}${resJson.error ? ': ' + String(resJson.error).slice(0, 200) : ''}` };
       } catch (err) {
         const timedOut = err?.name === 'TimeoutError' || err?.name === 'AbortError';
@@ -532,7 +593,7 @@ export async function handle(req, res, url, ctx) {
       const ms = Date.now() - t0;
       const target = safeOrigin(acesioUrl);
       // Log aman: tanpa API key, tanpa isi pesan/catatan; nomor disamarkan.
-      acesioLog({ cid, leadId: l.id, phone: maskPhone(l.phone), target, ok: out.ok, http: out.http, kind: out.kind || 'ok', ms, error: out.error });
+      acesioLog({ cid, leadId: l.id, phone: maskPhone(l.phone), target, ok: out.ok, http: out.http, kind: out.kind || 'ok', ms, replayed: out.replayed === true, error: out.error });
 
       if (!out.ok) {
         // Data CRM tidak disentuh; hanya status percobaan dicatat. Status 'sent' dari pengiriman sebelumnya dipertahankan.
@@ -546,15 +607,24 @@ export async function handle(req, res, url, ctx) {
       }
       let updated = l;
       let warning;
+      const at = Date.now();
+      // replayed:true = data sudah ada di Acesio dan tidak diperbarui: bukan pengiriman baru (acesioSentAt tidak diubah).
+      // Penanda acesioReplayed tidak dinyalakan bila lead ini memang sudah tercatat terkirim oleh CRM sebelumnya.
+      const done = out.replayed
+        ? { acesioStatus: 'sent', acesioReplayed: l.acesioStatus === 'sent' ? l.acesioReplayed === true : true }
+        : { acesioStatus: 'sent', acesioReplayed: false, acesioSentAt: at };
       try {
-        updated = store.update(id, { acesioStatus: 'sent', acesioSentAt: Date.now(), acesioLastError: null, acesioLastAttemptAt: Date.now() }) || l;
+        updated = store.update(id, { ...done, acesioLastError: null, acesioLastAttemptAt: at }) || l;
       } catch (e) {
         // Acesio SUDAH menerima data. Jangan melapor gagal (memicu kirim ulang ganda); beri peringatan.
         warning = 'Data diterima Acesio tetapi status pengiriman gagal disimpan di CRM.';
         acesioLog({ cid, evt: 'status_save_failed', error: String(e?.message || e).slice(0, 120) });
       }
-      ctx.audit('lead.send_to_acesio', { id, cid, phone: l.phone, name: l.name, acesioId: out.acesioId, http: out.http, ms });
-      return send(200, { ok: true, cid, ...(warning ? { warning } : {}), lead: detailView(updated), message: 'Data customer berhasil dikirim ke Acesio' });
+      ctx.audit('lead.send_to_acesio', { id, cid, phone: l.phone, name: l.name, acesioId: out.acesioId, http: out.http, ms, replayed: out.replayed === true });
+      return send(200, {
+        ok: true, cid, ...(out.replayed ? { replayed: true } : {}), ...(warning ? { warning } : {}), lead: detailView(updated),
+        message: out.replayed ? 'Sudah ada di Acesio (tidak diperbarui)' : 'Data customer berhasil dikirim ke Acesio',
+      });
     }
 
     return false;
