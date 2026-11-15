@@ -16,7 +16,8 @@ const { fill } = await import('../src/bot-plan.js');
 const req = (token) => ({ headers: token ? { authorization: `Bearer ${token}` } : {} });
 let ipN = 0;
 const freshIp = () => `10.1.${Math.floor(++ipN / 250)}.${ipN % 250}`;
-process.on('exit', () => fs.rmSync(dir, { recursive: true, force: true }));
+// Windows tidak bisa menghapus berkas SQLite yang masih terbuka (EPERM); folder sementara boleh tersisa.
+process.on('exit', () => { try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* dibiarkan */ } });
 
 test('createKey: validasi dan bentuk token; hanya hash yang tersimpan', () => {
   assert.throws(() => C.createKey({ name: '', app: 'booking', scopes: ['leads:read'] }), /Nama kunci/);

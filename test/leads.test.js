@@ -11,7 +11,7 @@ const kw = JSON.parse(fs.readFileSync('config/keywords.json', 'utf8'));
 process.env.KEYWORDS_FILE = path.join(process.env.DATA_DIR, 'keywords.test.json');
 fs.writeFileSync(process.env.KEYWORDS_FILE, JSON.stringify({ ...kw, leadRule: 'platform' }));
 
-const { detect, ingest, qualifies, classify, hotMatches } = await import('../src/leads.js');
+const { detect, ingest, qualifies, classify, hotMatches, cleanWaName, isBlankName } = await import('../src/leads.js');
 const store = await import('../src/store.js');
 
 // deteksi platform dan keyword
@@ -161,3 +161,70 @@ assert.equal(al.lead.platform, 'Lainnya');
 assert.equal(classify(null, { text: 'Halo kak', ts: 1000, customerCount: 2 }, kw).created, true); // pesan ke-2 pun boleh jadi lead
 
 console.log('Semua uji lolos');
+
+// ---- sesi C2: nama WhatsApp (waName) dan nomor ----
+// cleanWaName: spasi/baris baru dirapikan, 2-100 karakter, selain itu ''
+assert.equal(cleanWaName('  Rina   Putri '), 'Rina Putri');
+assert.equal(cleanWaName('Rina\nPutri\r\n\tS'), 'Rina Putri S'); // tanpa baris baru
+assert.equal(cleanWaName('A'), '');
+assert.equal(cleanWaName('   '), '');
+assert.equal(cleanWaName('ab'), 'ab');
+assert.equal(cleanWaName('x'.repeat(100)), 'x'.repeat(100));
+assert.equal(cleanWaName('x'.repeat(101)), '');
+assert.equal(cleanWaName(null), '');
+assert.equal(cleanWaName(undefined), '');
+assert.equal(cleanWaName(12345), '');
+assert.equal(isBlankName(''), true);
+assert.equal(isBlankName('  '), true);
+assert.equal(isBlankName('Tanpa Nama'), true);
+assert.equal(isBlankName(' tanpa nama '), true);
+assert.equal(isBlankName('Budi'), false);
+
+// lead baru: waName tersimpan, name diisi dari nama WhatsApp (sudah dibersihkan)
+const wa1 = ingest({ phone: '6281300000001', name: '  Rina   Putri ', text: 'dari Instagram' });
+assert.equal(wa1.created, true);
+assert.equal(wa1.lead.waName, 'Rina Putri');
+assert.equal(wa1.lead.name, 'Rina Putri');
+// pushName berubah: waName ikut terbaru, name yang sudah terisi TIDAK ditimpa
+const wa2 = ingest({ phone: '6281300000001', name: 'Rina P', text: 'oke' });
+assert.equal(wa2.lead.waName, 'Rina P');
+assert.equal(wa2.lead.name, 'Rina Putri');
+// hasil edit admin tidak pernah ditimpa
+store.update(wa1.lead.id, { name: 'Bu Rina (VIP)' });
+const wa3 = ingest({ phone: '6281300000001', name: 'Rina Baru', text: 'oke lagi' });
+assert.equal(wa3.lead.waName, 'Rina Baru');
+assert.equal(wa3.lead.name, 'Bu Rina (VIP)');
+// nama WhatsApp tidak valid tidak menghapus waName yang sudah ada
+const wa4 = ingest({ phone: '6281300000001', name: 'X', text: 'halo' });
+assert.equal(wa4.lead.waName, 'Rina Baru');
+assert.equal(ingest({ phone: '6281300000001', name: '', text: 'halo' }).lead.waName, 'Rina Baru');
+assert.equal(ingest({ phone: '6281300000001', name: 'y'.repeat(101), text: 'halo' }).lead.waName, 'Rina Baru');
+// name kosong atau "Tanpa Nama" diisi dari nama WhatsApp (nomor baru / data belum lengkap)
+store.update(wa1.lead.id, { name: 'Tanpa Nama' });
+assert.equal(ingest({ phone: '6281300000001', name: 'Rina Final', text: 'halo' }).lead.name, 'Rina Final');
+store.update(wa1.lead.id, { name: '' });
+assert.equal(ingest({ phone: '6281300000001', name: 'Rina Lagi', text: 'halo' }).lead.name, 'Rina Lagi');
+// lead tanpa waName (data lama) + nama WA masuk: kedua field terisi
+const lama = store.add({ phone: '6281300000002', name: '', platform: 'Instagram', keyword: '', status: 'Cold Leads', dataType: 'New', createdAt: 1, lastMessageAt: 1, messageCount: 1 });
+const wa5 = ingest({ phone: '6281300000002', name: 'Sari', text: 'halo' });
+assert.equal(wa5.lead.id, lama.id);
+assert.equal(wa5.lead.waName, 'Sari');
+assert.equal(wa5.lead.name, 'Sari');
+// lead baru dengan nama WhatsApp tidak valid: name dan waName kosong
+const wa6 = ingest({ phone: '6281300000003', name: 'Z', text: 'dari Instagram' });
+assert.equal(wa6.created, true);
+assert.equal(wa6.lead.waName, '');
+assert.equal(wa6.lead.name, '');
+const wa7 = classify(null, { text: 'dari Instagram', phone: '7', name: 'Dewi\nAyu' });
+assert.equal(wa7.lead.name, 'Dewi Ayu');
+assert.equal(wa7.lead.waName, 'Dewi Ayu');
+
+// lead.phone tidak diubah oleh teks pesan; hanya LID -> phone kosong
+const lid1 = ingest({ lid: 'US.4455667788', name: 'Tamu LID', text: 'dari Instagram, nomor saya 081381688802' });
+assert.equal(lid1.created, true);
+assert.equal(lid1.lead.phone, null);
+assert.equal(lid1.lead.lid, 'US.4455667788');
+assert.equal(ingest({ lid: 'US.4455667788', name: 'Tamu LID', text: 'wa saya +62 813-8168-8802' }).lead.phone, null);
+assert.equal(ingest({ phone: '6281300000001', name: 'Rina Lagi', text: 'nomor saya 08123456789 ya' }).lead.phone, '6281300000001');
+// pesan dari nomor yang sama sesudah JID asli muncul: phone terisi dari JID (bukan dari teks)
+assert.equal(ingest({ phone: '6281381688802', lid: 'US.4455667788', name: 'Tamu LID', text: 'halo' }).lead.phone, '6281381688802');

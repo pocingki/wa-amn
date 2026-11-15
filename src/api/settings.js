@@ -1,4 +1,5 @@
 // /api/settings: baca/ubah pengaturan (versi + If-Match), riwayat, pemulihan.
+// Memuat ai.* dan knowledge[] tetapi TIDAK PERNAH kunci API (hanya ai.hasKey boolean; kunci diurus /api/ai/key).
 import * as settings from '../settings.js';
 
 const META = new Set(['version', 'updatedAt', 'updatedBy']);
@@ -31,8 +32,11 @@ export async function handle(req, res, url, ctx) {
     try {
       const before = settings.get().waProvider;
       const next = settings.update(body, { expectedVersion: ifMatch(req), by: ctx.user?.name });
-      // audit: hanya nama kunci, tanpa nilai (token/webhook rahasia)
-      ctx.audit('settings.update', { fields: Object.keys(body).filter((k) => k in settings.DEFAULTS && !META.has(k)), version: next.version });
+      // audit: hanya nama kunci, tanpa nilai (token/webhook rahasia, persona/aturan/isi basis pengetahuan)
+      const detail = { fields: Object.keys(body).filter((k) => k in settings.DEFAULTS && !META.has(k)), version: next.version };
+      if (isObj(body.ai)) detail.aiFields = Object.keys(body.ai).filter((k) => k in settings.DEFAULTS.ai);
+      if (Array.isArray(body.knowledge)) detail.knowledgeCount = next.knowledge.length;
+      ctx.audit('settings.update', detail);
       const view = settings.publicView(next);
       if (next.waProvider !== before) view.restartRequired = true; // penyedia WA baru dipakai setelah restart
       ctx.sendJSON(res, 200, view);

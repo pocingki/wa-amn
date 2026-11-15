@@ -75,7 +75,7 @@ test('saveSettings: antrean menghitung patch dari data terbaru + If-Match naik',
   globalThis.document = { getElementById: () => el(), createElement: el, body: el() };
   const st = globalThis.setTimeout;
   globalThis.setTimeout = (f, ms) => { const t = st(f, ms); if (ms >= 1000) t.unref?.(); return t; }; // hanya timer toast yang di-unref
-  let server = { version: 1, intents: [{ id: 'a', active: true }, { id: 'b', active: true }] };
+  let server = { version: 1, knowledge: [{ id: 'a', enabled: true }, { id: 'b', enabled: true }] };
   const seen = [];
   globalThis.fetch = async (path, o) => {
     if (o.method === 'GET') return { ok: true, status: 200, text: async () => JSON.stringify(server) };
@@ -85,10 +85,10 @@ test('saveSettings: antrean menghitung patch dari data terbaru + If-Match naik',
     return { ok: true, status: 200, text: async () => JSON.stringify(server) };
   };
   await lib.loadSettings();
-  const t = (id) => (c) => ({ intents: c.intents.map((i) => (i.id === id ? { ...i, active: false } : i)) });
+  const t = (id) => (c) => ({ knowledge: c.knowledge.map((i) => (i.id === id ? { ...i, enabled: false } : i)) });
   await Promise.all([lib.saveSettings(t('a')), lib.saveSettings(t('b'))]); // toggle cepat
   assert.deepEqual(seen, ['1', '2']);
-  assert.deepEqual(server.intents.map((i) => i.active), [false, false]); // tidak saling menimpa
+  assert.deepEqual(server.knowledge.map((i) => i.enabled), [false, false]); // tidak saling menimpa
   globalThis.setTimeout = st;
   delete globalThis.document;
 });
@@ -161,68 +161,94 @@ test('chatHTML: chip tanggal, chip sistem, teks status hanya di pesan terakhir',
   assert.equal((h.match(/b-st-text/g) || []).length, 1);
 });
 
-test('keywordConflicts: sama persis dan tumpang tindih', () => {
-  const intents = [
-    { name: 'Harga', keywords: ['harga', 'biaya'], active: true },
-    { name: 'Paket', keywords: ['harga paket', 'promo'], active: true },
-    { name: 'Lain', keywords: ['alamat'], active: true },
-    { name: 'Mati', keywords: ['harga'], active: false },
+test('knowledgeFromText: pisah per "# Judul", teks liar dilaporkan, escape dibuka', () => {
+  const txt = '﻿catatan liar\r\n# Harga\r\nPaket A Rp 100\r\n## Sub\r\nlanjut\r\n\r\n# Jam buka #\r\n\\# bukan judul\r\n#tanpaspasi\r\n#\r\n# Kosong\r\n';
+  const { items, errors } = lib.knowledgeFromText(txt);
+  assert.deepEqual(items.map((x) => x.title), ['Harga', 'Jam buka', 'Kosong']);
+  assert.equal(items[0].content, 'Paket A Rp 100\n## Sub\nlanjut');
+  assert.equal(items[1].content, '# bukan judul\n#tanpaspasi\n#');
+  assert.equal(items[2].content, '');
+  assert.equal(items[0].line, 2);
+  assert.equal(errors.length, 1);
+  assert.equal(errors[0].line, 1);
+  assert.deepEqual(lib.knowledgeFromText('tanpa judul sama sekali').items, []);
+  assert.deepEqual(lib.knowledgeFromText('').errors, []);
+});
+
+test('knowledgeToMarkdown: bulat-balik (round trip) termasuk baris berawalan "# "', () => {
+  const entries = [
+    { id: 'a', title: 'Harga', content: 'Baris 1\n# kelihatan judul\n\\# sudah miring\nBaris 4', enabled: true },
+    { id: 'b', title: 'Judul\nDua baris', content: 'Isi', enabled: false },
   ];
-  const c = lib.keywordConflicts(intents);
-  assert.ok(c.has(0) && c.has(1));
-  assert.ok(!c.has(2) && !c.has(3));
-  assert.equal(c.get(0)[0].kind, 'tumpang');
-  const same = lib.keywordConflicts([{ name: 'A', keywords: ['Harga'] }, { name: 'B', keywords: ['harga!'] }]);
-  assert.equal(same.get(0)[0].kind, 'sama');
-  assert.match(lib.conflictText(same.get(0)[0]), /"B"/);
+  const md = lib.knowledgeToMarkdown(entries);
+  assert.ok(md.endsWith('\n'));
+  assert.equal(lib.knowledgeToMarkdown([]), '');
+  const back = lib.knowledgeFromText(md);
+  assert.equal(back.errors.length, 0);
+  assert.deepEqual(back.items.map((x) => [x.title, x.content]), [['Harga', entries[0].content], ['Judul Dua baris', 'Isi']]);
 });
 
-test('CSV: kutip, baris ganda, nomor baris, kutip tidak ditutup, formula guard', () => {
-  const csv = 'intent,kata_kunci,respons,aktif,prioritas\r\n"Harga","harga|biaya","Baris1\nBaris2, ok",1,5\r\nKosong,,,0,\r\n';
-  const { items } = lib.intentsFromCSV(csv);
-  assert.equal(items.length, 2);
-  assert.equal(items[0].response, 'Baris1\nBaris2, ok');
-  assert.deepEqual(items[0].keywords, ['harga', 'biaya']);
-  assert.equal(items[0].priority, '5');
-  assert.equal(items[1].line, 4); // baris fisik (respons sebelumnya 2 baris)
-  assert.equal(items[1].active, false);
-  assert.equal(lib.intentsFromCSV('a,b,c\n"x,y,z').errors.length, 1);
-  assert.equal(lib.csvCell('=1+1'), '"\'=1+1"');
-  assert.equal(lib.intentsFromCSV('intent,respons\n"\'=cmd","ok"').items[0].name, '=cmd');
-  assert.equal(lib.intentsFromCSV('intent;kata_kunci;respons\nA;x;y').items[0].response, 'y'); // titik koma
-  assert.throws(() => lib.intentsFromJSON('{rusak'), /JSON tidak valid/);
-  assert.equal(lib.intentsFromJSON('{"intents":[{"intent":"A","respons":"B"}]}').items[0].name, 'A');
+test('validateKnowledgeEntry, knowledgeStats, knowledgeLimitError, filterKnowledge', () => {
+  assert.equal(lib.validateKnowledgeEntry({ title: ' ', content: 'x' }), 'Judul kosong');
+  assert.equal(lib.validateKnowledgeEntry({ title: 'A', content: '  ' }), 'Isi kosong');
+  assert.match(lib.validateKnowledgeEntry({ title: 'A', content: 'x'.repeat(20001) }), /20000/);
+  assert.equal(lib.validateKnowledgeEntry({ title: 'A', content: 'x'.repeat(20000) }), '');
+  const list = [{ id: '1', title: 'Harga', content: 'Rp 100', enabled: true }, { id: '2', title: 'Alamat', content: 'Jl. Mawar', enabled: false }];
+  assert.deepEqual(lib.knowledgeStats(list), { count: 2, enabled: 1, chars: 15 });
+  assert.deepEqual(lib.knowledgeStats(null), { count: 0, enabled: 0, chars: 0 });
+  assert.equal(lib.knowledgeLimitError(list), '');
+  assert.match(lib.knowledgeLimitError(Array.from({ length: 201 }, () => ({ content: 'a' }))), /200 entri/);
+  assert.match(lib.knowledgeLimitError(Array.from({ length: 11 }, () => ({ content: 'a'.repeat(20000) }))), /200000/);
+  assert.deepEqual(lib.filterKnowledge(list, 'MAWAR').map((x) => x.id), ['2']);
+  assert.deepEqual(lib.filterKnowledge(list, '  ').length, 2);
+  assert.deepEqual(lib.filterKnowledge(list, 'zzz'), []);
 });
 
-test('previewIntentImport: baru / duplikat / error per baris + mode', () => {
-  const existing = [{ id: 'harga', name: 'Tanya Harga', keywords: ['harga'], response: 'lama', active: true, priority: 1 }];
+test('previewKnowledgeImport: baru / duplikat / error per entri + mode + batas', () => {
+  let n = 0;
+  const gen = () => 'id' + ++n;
+  const existing = [{ id: 'h', title: 'Tanya  Harga', content: 'lama', enabled: false }];
   const items = [
-    { line: 2, name: 'tanya  harga', keywords: ['tarif'], response: 'baru', active: true, priority: null },
-    { line: 3, name: 'Alamat', keywords: ['alamat'], response: 'Jl. A', active: true, priority: '3' },
-    { line: 4, name: 'Alamat', keywords: [], response: 'dobel', active: true, priority: null },
-    { line: 5, name: '', keywords: [], response: 'x', active: true, priority: null },
-    { line: 6, name: 'P', keywords: [], response: 'x', active: true, priority: '999' },
+    { line: 1, title: 'tanya harga', content: 'baru' },
+    { line: 5, title: 'Alamat', content: 'Jl. A' },
+    { line: 9, title: 'alamat', content: 'dobel' },
+    { line: 12, title: 'Kosong', content: '' },
+    { line: 14, title: 'Panjang', content: 'x'.repeat(20001) },
   ];
-  const add = lib.previewIntentImport(existing, items, 'add');
+  const add = lib.previewKnowledgeImport(existing, items, 'add', gen);
   assert.deepEqual(add.rows.map((r) => r.state), ['duplikat', 'baru', 'duplikat', 'error', 'error']);
-  assert.deepEqual(add.counts, { baru: 1, duplikat: 2, error: 2 });
+  assert.deepEqual(add.counts, { baru: 1, duplikat: 2, error: 2, diperbarui: 0 });
   assert.equal(add.result.length, 2);
-  assert.equal(add.result[0].response, 'lama');
-  const upd = lib.previewIntentImport(existing, items, 'update');
-  assert.equal(upd.result[0].response, 'baru');
-  assert.equal(upd.result[0].id, 'harga');
-  assert.equal(upd.result[0].priority, 1); // prioritas tidak ada di file: dipertahankan
-  assert.equal(lib.previewIntentImport(existing, items, 'replace').result.length, 2);
-  const full = lib.previewIntentImport(Array.from({ length: 300 }, (_, i) => ({ name: 'n' + i, keywords: [], response: 'r' })), [items[1]], 'add');
-  assert.match(full.rows[0].reason, /batas 300/);
+  assert.equal(add.result[0].content, 'lama');
+  assert.deepEqual(add.result[1], { id: 'id1', title: 'Alamat', content: 'Jl. A', enabled: true });
+  assert.equal(existing.length, 1); // masukan tidak diubah
+  const upd = lib.previewKnowledgeImport(existing, items, 'update', gen);
+  assert.equal(upd.result[0].content, 'baru');
+  assert.equal(upd.result[0].id, 'h');
+  assert.equal(upd.result[0].enabled, false); // status aktif dipertahankan
+  assert.equal(upd.counts.diperbarui, 1);
+  assert.equal(lib.previewKnowledgeImport(existing, items, 'replace', gen).result.length, 2); // judul lama tidak dibawa
+  // batas jumlah entri
+  const full = Array.from({ length: 200 }, (_, i) => ({ id: 'e' + i, title: 'n' + i, content: 'r' }));
+  assert.match(lib.previewKnowledgeImport(full, [items[1]], 'add', gen).rows[0].reason, /batas 200/);
+  // batas total karakter
+  const big = Array.from({ length: 10 }, (_, i) => ({ id: 'b' + i, title: 'b' + i, content: 'x'.repeat(19999) }));
+  const tot = lib.previewKnowledgeImport(big, [{ line: 1, title: 'Baru', content: 'y'.repeat(10) }], 'add', gen);
+  assert.equal(tot.rows[0].state, 'baru');
+  const tot2 = lib.previewKnowledgeImport(big, [{ line: 1, title: 'Baru', content: 'y'.repeat(10) }, { line: 2, title: 'Lagi', content: 'z'.repeat(1) }], 'add', gen);
+  assert.equal(tot2.rows[1].state, 'error');
+  const updBig = lib.previewKnowledgeImport(big, [{ line: 1, title: 'b0', content: 'q'.repeat(20000) }], 'update', gen);
+  assert.equal(updBig.rows[0].state, 'duplikat'); // masih muat: 199.990 - 19.999 + 20.000
+  const noRoom = lib.previewKnowledgeImport([...big, { id: 'z', title: 'z', content: 'x'.repeat(10) }], [{ line: 1, title: 'b0', content: 'q'.repeat(20000) }], 'update', gen);
+  assert.match(noRoom.rows[0].reason, /total/);
 });
 
-test('parseSlang / slangToText / parseKeywords / parseOptions', () => {
-  const r = lib.parseSlang('gak = tidak\nbgt => banget\n# komentar\nrusak\ngak = lagi\nsama = sama');
-  assert.deepEqual(r.map, { gak: 'tidak', bgt: 'banget' });
-  assert.deepEqual(r.errors.map((e) => e.line), [4, 5, 6]);
-  assert.equal(lib.slangToText({ gak: 'tidak' }), 'gak = tidak');
-  assert.deepEqual(lib.parseKeywords('Harga, biaya;HARGA\nTarif'), ['harga', 'biaya', 'tarif']);
+test('newKnowledgeId unik dan deterministik bila disuntik', () => {
+  assert.equal(lib.newKnowledgeId(() => 0, () => 36), 'k10000000');
+  assert.notEqual(lib.newKnowledgeId(), lib.newKnowledgeId());
+});
+
+test('parseOptions', () => {
   assert.deepEqual(lib.parseOptions('A\nB, A | C'), ['A', 'B', 'C']);
 });
 
@@ -247,11 +273,15 @@ test('percakapan: filterConversations', () => {
   assert.deepEqual(percakapan.filterConversations(l, 'all', 'gambar').map((c) => c.phone), ['2']);
 });
 
-test('pesan: move menggeser berdasarkan id', () => {
-  const list = [{ id: 'a' }, { id: 'b' }, { id: 'c' }];
-  assert.deepEqual(pesan.move(list, 'b', -1, 'intents').intents.map((x) => x.id), ['b', 'a', 'c']);
-  assert.equal(pesan.move(list, 'a', -1, 'intents'), null);
-  assert.throws(() => pesan.move(list, 'zzz', 1, 'intents'), /dihapus/);
+test('pesan: referensiField dan buildReferensi (tepat satu butir)', () => {
+  assert.deepEqual(pesan.referensiField(undefined), pesan.REFERENSI_DEFAULT);
+  assert.deepEqual(pesan.referensiField([{ id: 'nama', label: 'Nama', enabled: true }]), pesan.REFERENSI_DEFAULT);
+  const f = pesan.referensiField([{ id: 'nama' }, { id: 'referensi', type: 'text', enabled: false, question: 'Tahu dari mana?', label: 'x' }]);
+  assert.deepEqual(f, { id: 'referensi', type: 'text', enabled: false, question: 'Tahu dari mana?' });
+  assert.deepEqual(pesan.buildReferensi({ enabled: true, question: '  Dari mana?  ' }), [{ id: 'referensi', type: 'text', enabled: true, question: 'Dari mana?' }]);
+  assert.equal(pesan.buildReferensi({ enabled: false, question: 'x' })[0].enabled, false);
+  assert.throws(() => pesan.buildReferensi({ enabled: true, question: '   ' }), /tidak boleh kosong/);
+  assert.throws(() => pesan.buildReferensi({ enabled: true, question: 'x'.repeat(501) }), /500/);
 });
 
 test('pengaturan: buildSettingsPatch validasi', () => {

@@ -22,7 +22,31 @@ const SORT_OPTS = [
 const PAGE_SIZE = 25;
 const DEFAULT_F = { q: '', status: '', platform: '', dataType: '', awaiting: false, overdue: false, blocked: false, sort: 'lastContactAt', dir: 'desc', page: 1 };
 
-let alive = false, meta = { statuses: [], dataTypes: [], hotStages: [], platforms: [] }, tz = 'Asia/Jakarta', period = 'day', me = { name: '', role: '' }, labels = {};
+// Format nomor untuk TAMPILAN saja (salinan sederhana dari kontrak formatPhone; data kanonik tetap angka).
+export function formatPhone(phone, mode = 'digits') {
+  const d = String(phone ?? '').replace(/\D/g, '');
+  if (!d || mode !== 'international') return d;
+  if (d.startsWith('62')) {
+    const rest = d.slice(2);
+    return '+62 ' + [rest.slice(0, 3), rest.slice(3, 7), rest.slice(7)].filter(Boolean).join('-');
+  }
+  return '+' + d;
+}
+
+// Kelengkapan data untuk Acesio: pakai acesioReadiness dari server; cadangan lokal bila belum ada.
+const MISSING_LABEL = { phone: 'Nomor WhatsApp', referensi: 'Referensi', name: 'Nama' };
+export function readinessOf(l) {
+  if (l.acesioReadiness && Array.isArray(l.acesioReadiness.missing)) return l.acesioReadiness;
+  const missing = [];
+  if (!/\d/.test(String(l.phone || ''))) missing.push('phone');
+  if (!String(l.referensi || '').trim()) missing.push('referensi');
+  const nm = String(l.name || '').trim();
+  if (nm.length < 2 || nm === 'Tanpa Nama') missing.push('name');
+  const eligible = l.status === 'Hot Leads' && l.hotStage === 'Won';
+  return { eligible, ready: eligible && !missing.length, missing };
+}
+
+let alive = false, phoneFmt = 'digits', meta = { statuses: [], dataTypes: [], hotStages: [], platforms: [] }, tz = 'Asia/Jakarta', period = 'day', me = { name: '', role: '' }, labels = {};
 let data = { leads: [], total: 0, page: 1, pageSize: PAGE_SIZE };
 let listTimer = null, statsTimer = null, searchTimer = null, listSeq = 0, statsSeq = 0, lastKey = '', lastStatsKey = '';
 const f = { ...DEFAULT_F };
@@ -50,10 +74,14 @@ const check = (id, text) => `<label class="flex items-center gap-1.5 text-sm tex
 export async function mount(el) {
   alive = true;
   Object.assign(f, DEFAULT_F);
-  period = 'day'; lastKey = ''; lastStatsKey = ''; tz = 'Asia/Jakarta';
+  period = 'day'; lastKey = ''; lastStatsKey = ''; tz = 'Asia/Jakarta'; phoneFmt = 'digits';
   meta = { statuses: [], dataTypes: [], hotStages: [], platforms: [] };
   data = { leads: [], total: 0, page: 1, pageSize: PAGE_SIZE };
-  try { labels = Object.fromEntries((await api('/api/settings')).requiredFields.map((x) => [x.id, x.label])); } catch { /* abaikan */ }
+  try {
+    const st = await api('/api/settings');
+    labels = Object.fromEntries((st.requiredFields || []).map((x) => [x.id, x.label || (x.id === 'referensi' ? 'Referensi' : x.id)]));
+    phoneFmt = st.phoneFormat === 'international' ? 'international' : 'digits';
+  } catch { /* abaikan: format nomor kembali ke angka */ }
   try {
     const m = await api('/api/me');
     me = { role: m.role || m.user?.role || '', name: m.name || m.user?.name || (typeof m.user === 'string' ? m.user : '') };
@@ -144,6 +172,7 @@ export async function mount(el) {
   await Promise.all([loadList(), loadStats()]);
   if (!alive) return;
   document.addEventListener('visibilitychange', onVisibility);
+  document.addEventListener('copy', onCopy);
   if (!document.hidden) startTimers();
 }
 
@@ -152,8 +181,20 @@ export function unmount() {
   stopTimers();
   clearTimeout(searchTimer);
   document.removeEventListener('visibilitychange', onVisibility);
+  document.removeEventListener('copy', onCopy);
   observers.forEach((o) => o.disconnect());
   observers.clear();
+}
+
+// Salin-tempel nomor tetap angka kanonik walau tampilan berformat.
+function onCopy(e) {
+  const sel = window.getSelection?.();
+  if (!sel || sel.isCollapsed || !sel.anchorNode) return;
+  const node = sel.anchorNode.nodeType === 1 ? sel.anchorNode : sel.anchorNode.parentElement;
+  const span = node?.closest?.('[data-phone]');
+  if (!span || !span.contains(sel.focusNode) || sel.toString().trim() !== span.textContent.trim()) return;
+  e.clipboardData.setData('text/plain', span.dataset.phone);
+  e.preventDefault();
 }
 
 // ---------- polling ----------
@@ -276,6 +317,8 @@ function head() {
 }
 
 const label = (l) => l.name || l.phone || 'tanpa nama';
+const fmtPhone = (p) => formatPhone(p, phoneFmt);
+const phoneSpan = (p) => `<span data-phone="${esc(p)}">${esc(fmtPhone(p))}</span>`;
 const hotCand = (l) => l.hotCandidate && l.status !== 'Hot Leads';
 const pill = (text, cls, title = '') => `<span ${title ? `title="${esc(title)}"` : ''} class="inline-block px-2 py-0.5 rounded-full text-[11px] font-medium ${cls}">${esc(text)}</span>`;
 
@@ -285,8 +328,9 @@ function nameCell(l) {
     l.followUpOverdue && pill('Tindak lanjut lewat', 'bg-red-100 text-red-700'),
     hotCand(l) && pill('Kandidat Hot', 'bg-orange-100 text-orange-800', l.hotCandidate.reason),
     l.blocked && pill('Terblokir', 'bg-gray-200 text-gray-700'),
+    !l.phone && pill('Nomor belum terbaca', 'bg-gray-200 text-gray-700', 'Lead hanya punya LID/BSUID: nomor WhatsApp belum diketahui'),
   ].filter(Boolean).join(' ');
-  return `<div class="font-medium text-gray-900">${esc(l.name || 'Tanpa nama')}</div><div class="text-xs text-gray-500">${esc(l.phone || (l.lid ? 'LID ' + l.lid : '-'))}</div>
+  return `<div class="font-medium text-gray-900">${esc(l.name || 'Tanpa nama')}</div><div class="text-xs text-gray-500">${l.phone ? phoneSpan(l.phone) : esc(l.lid ? 'LID ' + l.lid : '-')}</div>
     ${badges ? `<div class="flex flex-wrap gap-1 mt-1">${badges}</div>` : ''}
     ${hotCand(l) ? `<button type="button" data-act="confirm-hot" data-id="${esc(l.id)}" aria-label="Konfirmasi ${esc(label(l))} sebagai Hot" class="mt-1 text-xs font-medium text-red-700 underline hover:text-red-900">Konfirmasi Hot</button>` : ''}`;
 }
@@ -305,9 +349,9 @@ function statusCell(l) {
     const stg = l.hotStage || 'Follow Up';
     extra += `<div class="mt-1">${pill(stg, STAGE_CLS[stg] || 'bg-red-100 text-red-800')}</div>`;
     if (l.acesioStatus === 'sent') {
-      extra += `<div class="mt-0.5"><span class="inline-flex items-center text-[10px] text-emerald-700 font-medium">✓ Dikirim ke Acesio</span></div>`;
+      extra += `<div class="mt-0.5"><span class="inline-flex items-center text-[10px] text-emerald-700 font-medium">${l.acesioReplayed ? 'Sudah ada di Acesio' : '✓ Diajukan ke Acesio'}</span></div>`;
     } else if (l.acesioStatus === 'failed') {
-      extra += `<div class="mt-0.5"><span class="inline-flex items-center text-[10px] text-red-700 font-medium">Gagal kirim ke Acesio</span></div>`;
+      extra += `<div class="mt-0.5"><span class="inline-flex items-center text-[10px] text-red-700 font-medium">Gagal diajukan ke Acesio</span></div>`;
     }
   }
   return `<span ${tip ? `title="${esc(tip)}"` : ''} class="px-2.5 py-1 rounded-full text-xs font-medium ${ST[l.status] || ''}">${esc(l.status)}</span>${extra}${l.statusManual ? '<div class="text-[10px] text-gray-400 mt-1">manual</div>' : ''}`;
@@ -387,6 +431,34 @@ function refreshAll() { lastKey = ''; lastStatsKey = ''; loadList(); loadStats()
 // ---------- modal edit ----------
 const sel = (name, opts, cur) => `<select name="${name}" class="${INP}">${opts.map((o) => `<option ${o === cur ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select>`;
 
+// Panel Acesio di detail lead: daftar periksa 3 butir, status, dan tombol ajukan.
+function acesioPanel(l) {
+  const rd = readinessOf(l);
+  const miss = new Set(rd.missing);
+  const items = ['phone', 'referensi', 'name'].map((k) => {
+    const ok = !miss.has(k);
+    return `<li class="flex items-center gap-2"><span aria-hidden="true" class="${ok ? 'text-emerald-700' : 'text-red-700'} font-bold">${ok ? '✓' : '✗'}</span><span>${MISSING_LABEL[k]}: <b>${ok ? 'lengkap' : 'kurang'}</b></span></li>`;
+  }).join('');
+  let status = 'Belum diajukan ke Acesio.';
+  if (l.acesioStatus === 'sent') {
+    status = l.acesioReplayed
+      ? 'Sudah ada di Acesio (tidak diperbarui).'
+      : `Diajukan${l.acesioSentAt ? ' pada ' + fmtDT(l.acesioSentAt) : ''} (menunggu persetujuan admin Acesio).`;
+  } else if (l.acesioStatus === 'failed') {
+    status = `Gagal diajukan${l.acesioLastError ? ': ' + l.acesioLastError : '.'}`;
+  }
+  const hint = !rd.eligible ? 'Tombol aktif setelah tahap Hot Lead mencapai Won.'
+    : rd.missing.length ? `Lengkapi dulu: ${rd.missing.map((k) => MISSING_LABEL[k] || k).join(', ')}.` : '';
+  return `<div class="bg-emerald-50 border border-emerald-200 rounded-lg p-3 space-y-2" id="acesio-box">
+    <p class="text-sm font-bold text-emerald-900">Pengajuan ke Acesio</p>
+    <ul class="text-sm text-emerald-900 space-y-1" aria-label="Daftar periksa data Acesio">${items}</ul>
+    <p class="text-xs ${l.acesioStatus === 'failed' ? 'text-red-700' : 'text-emerald-800'} font-medium" role="status">${esc(status)}</p>
+    <div class="flex flex-wrap items-center gap-3">
+      <button type="button" data-a="send-acesio" class="${BTN} bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-40" ${rd.ready ? '' : 'disabled'} ${hint ? 'aria-describedby="acesio-hint"' : ''}>Ajukan ke Acesio</button>
+      ${hint ? `<span id="acesio-hint" class="text-xs text-emerald-800">${esc(hint)}</span>` : ''}
+    </div></div>`;
+}
+
 async function openEdit(id, trigger) {
   let l;
   try { l = (await api('/api/leads/' + encodeURIComponent(id))).lead; } catch (err) { toast(err.message, true); return; }
@@ -404,24 +476,16 @@ async function openEdit(id, trigger) {
   modal('Edit lead', `<div id="lm" class="space-y-4">
     ${l.blocked ? '<p class="text-sm bg-gray-100 text-gray-700 rounded-lg p-2">Lead ini diblokir: tersembunyi dari daftar dan statistik.</p>' : ''}
     ${hotCand(l) ? `<div class="text-sm bg-orange-50 text-orange-800 rounded-lg p-3 flex items-center justify-between gap-3"><span><b>Kandidat Hot:</b> ${esc(l.hotCandidate.reason || '')}</span>${act('confirm-hot', 'Konfirmasi Hot', BTN_DARK)}</div>` : ''}
-    ${field('Nama', `<input name="name" maxlength="200" class="${INP}" value="${esc(l.name)}">`)}
-    ${field('No WA', `<input class="${INP} bg-gray-100" value="${esc(l.phone || '')}" disabled>`)}
+    ${field('Nama', `<input name="name" maxlength="200" class="${INP}" value="${esc(l.name)}">`, l.waName ? `Nama WhatsApp: ${esc(l.waName)}` : '')}
+    <div class="block text-sm font-medium text-gray-700">No WA<div class="mt-1 font-normal flex flex-wrap items-center gap-2">${l.phone
+      ? `<span class="${INP} bg-gray-100 !w-auto">${phoneSpan(l.phone)}</span><button type="button" data-a="copy-phone" data-phone="${esc(l.phone)}" aria-label="Salin nomor WhatsApp (angka)" class="text-xs font-medium px-2 py-1 rounded border border-gray-300 hover:bg-gray-50">Salin</button>`
+      : `<span class="${INP} bg-gray-100 !w-auto text-gray-500">${esc(l.lid ? 'LID ' + l.lid : '-')}</span>${pill('Nomor belum terbaca', 'bg-gray-200 text-gray-700', 'Lead hanya punya LID/BSUID: nomor WhatsApp belum diketahui')}`}</div></div>
+    ${field('Referensi', `<input name="referensi" maxlength="50" class="${INP}" value="${esc(l.referensi || '')}">`, 'Dari mana customer mengetahui kami (maks 50 karakter). Diisi dari jawaban customer atau diedit di sini.')}
     ${field('Sumber', sel('platform', platforms, l.platform))}
     ${field('Keyword Matched', `<input name="keyword" maxlength="200" class="${INP}" value="${esc(l.keyword)}">`)}
     ${field('Status Lead', sel('status', statuses, l.status), 'Otomatis: Cold saat pesan masuk pertama kali, Warm saat percakapan lebih dari 10 pesan, Hot saat ada transaksi/booking/transfer. Jika diubah manual, status ini dikunci.')}
     ${l.status === 'Hot Leads' ? field('Tahap Follow-Up Hot Lead', sel('hotStage', hotStages, l.hotStage || 'Follow Up'), 'Tingkatan verifikasi follow-up. Jika mencapai tahap Won, data dapat dikirim ke Acesio Dashboard.') : ''}
-    ${l.status === 'Hot Leads' && (l.hotStage === 'Won' || l.acesioStatus === 'sent') ? `
-    <div class="bg-emerald-50 border border-emerald-200 rounded-lg p-3 space-y-2">
-      <div class="flex items-center justify-between gap-3">
-        <div>
-          <p class="text-sm font-bold text-emerald-900">Lead Berstatus WON</p>
-          <p class="text-xs text-emerald-700">Kirim data calon customer ini ke Acesio Dashboard.</p>
-        </div>
-        ${act('send-acesio', l.acesioStatus === 'sent' ? 'Kirim Ulang ke Acesio' : 'Kirim Data ke Acesio', BTN + ' bg-emerald-600 text-white hover:bg-emerald-700')}
-      </div>
-      ${l.acesioStatus === 'sent' ? `<p class="text-xs text-emerald-800 font-medium">✓ Sudah dikirim pada ${fmtDT(l.acesioSentAt)} (Menunggu persetujuan admin Acesio)</p>` : ''}
-      ${l.acesioLastError ? `<p class="text-xs text-red-700">Percobaan terakhir ke Acesio gagal: ${esc(l.acesioLastError)}</p>` : ''}
-    </div>` : ''}
+    ${l.status === 'Hot Leads' || l.acesioStatus === 'sent' ? acesioPanel(l) : ''}
     ${field('Data Leads', sel('dataType', dataTypes, l.dataType), 'Otomatis: New pada pesan masuk pertama kali; Existing bila customer yang pernah booking/transfer melakukannya untuk kedua kalinya (permanen). Jika diubah manual, dikunci.')}
     ${l.statusManual || l.dataTypeManual ? '<label class="flex items-center gap-2 text-sm"><input type="checkbox" name="resetAuto" value="1"> Kembalikan Status Lead &amp; Data Leads ke otomatis</label>' : ''}
 
@@ -453,6 +517,7 @@ async function openEdit(id, trigger) {
     const fd = Object.fromEntries(new FormData(form));
     const body = { name: fd.name, keyword: fd.keyword, platform: fd.platform, status: fd.status, dataType: fd.dataType };
     if (fd.hotStage) body.hotStage = fd.hotStage;
+    if (String(fd.referensi ?? '').trim() !== String(l.referensi || '')) body.referensi = String(fd.referensi ?? '').trim().slice(0, 50);
     if (fd.resetAuto) body.resetAuto = true;
     await send('/api/leads/' + encodeURIComponent(id), body, 'PATCH');
     const date = $('#fu-date').value || null, note = $('#fu-note').value.trim();
@@ -502,11 +567,19 @@ async function openEdit(id, trigger) {
         notes.splice(notes.findIndex((n) => n.id === b.dataset.nid), 1); renderNotes(); lastKey = ''; loadList();
         return;
       }
+      if (a === 'copy-phone') {
+        try { await navigator.clipboard.writeText(b.dataset.phone); toast('Nomor disalin'); } catch { toast('Gagal menyalin nomor', true); }
+        return;
+      }
       if (a === 'send-acesio') {
+        const fm = $('#lm').closest('form');
+        const dirty = fm.elements.namedItem('name').value.trim() !== String(l.name || '').trim()
+          || fm.elements.namedItem('referensi').value.trim() !== String(l.referensi || '').trim();
+        if (dirty) { toast('Simpan perubahan Nama/Referensi dulu sebelum mengajukan ke Acesio', true); return; }
         b.disabled = true;
         try {
           const res = await send(`${base}/send-to-acesio`, {});
-          toast(res.message || 'Data customer berhasil dikirim ke Acesio!');
+          toast(res.lead?.acesioReplayed || res.replayed ? 'Sudah ada di Acesio (tidak diperbarui)' : (res.message || 'Data customer berhasil diajukan ke Acesio'));
           closeModal();
           refreshAll();
         } catch (err) {

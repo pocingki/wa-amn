@@ -49,7 +49,8 @@ test('[butuh A1] GET /api/settings memuat version (int) dan field kontrak K5', a
   const r = await c.get('/api/settings');
   assert.equal(r.status, 200);
   assert.ok(Number.isInteger(r.json.version), 'version harus integer');
-  for (const k of ['handoverMessage', 'staleMinutes', 'autoTakeoverOnPhoneReply', 'fallbackCooldownMinutes', 'sendRateLimitPerMinute', 'retentionDays', 'notify', 'slangMap', 'intents', 'requiredFields']) {
+  // intents/slangMap sudah keluar dari skema (digantikan S.knowledge dan S.ai oleh B7).
+  for (const k of ['handoverMessage', 'staleMinutes', 'autoTakeoverOnPhoneReply', 'fallbackCooldownMinutes', 'sendRateLimitPerMinute', 'retentionDays', 'notify', 'requiredFields']) {
     assert.ok(k in r.json, `settings.${k} tidak ada`);
   }
   assert.equal(r.json.staleMinutes, 10);
@@ -57,6 +58,24 @@ test('[butuh A1] GET /api/settings memuat version (int) dan field kontrak K5', a
   assert.equal(r.json.fallbackCooldownMinutes, 30);
   assert.equal(r.json.sendRateLimitPerMinute, 20);
   assert.ok(r.json.requiredFields.every((f) => ['text', 'name', 'phone', 'date', 'choice'].includes(f.type)));
+});
+
+test('[butuh B7] GET /api/settings memuat ai.* dan knowledge[] tanpa kunci API', async (t) => {
+  const r = await c.get('/api/settings');
+  assert.equal(r.status, 200);
+  if (!('ai' in r.json)) return t.skip('B7 belum digabung: pengaturan AI belum ada');
+  assert.equal(typeof r.json.ai.enabled, 'boolean');
+  assert.ok(Array.isArray(r.json.knowledge));
+  assert.ok(!('intents' in r.json) && !('slangMap' in r.json), 'intent lama harus sudah dimigrasikan');
+  assert.ok(!/api[-_]?key|secret|token/i.test(Object.keys(r.json.ai).join(' ')), 'kunci tidak boleh ada di pengaturan');
+});
+
+test('[butuh B7/B8] GET /api/ai/usage ada dan berbentuk pemakaian (tanpa kunci)', async (t) => {
+  const r = await c.get('/api/ai/usage');
+  if (r.status === 404 && /endpoint tidak ditemukan/i.test(r.json?.error || '')) return t.skip('B7/B8 belum digabung: /api/ai/usage belum ada');
+  assert.equal(r.status, 200, r.text);
+  assert.ok(r.json.month && typeof r.json.month.limit === 'number');
+  assert.ok(!/apiKey|"key"/i.test(r.text));
 });
 
 test('[butuh A1] PUT /api/settings dengan If-Match basi -> 409 {error,current}; versi benar -> naik', async () => {

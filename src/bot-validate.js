@@ -1,5 +1,36 @@
-// Validasi jawaban pelanggan untuk data wajib. Fungsi murni (hanya memakai normalizeText dari fase yang sama).
-import { normalizeText } from './bot-intent.js';
+// Validasi jawaban pelanggan, normalisasi teks, dan deteksi salam/pertanyaan. Fungsi murni tanpa I/O.
+
+const DEFAULT_SLANG = {
+  hrg: 'harga', brp: 'berapa', tlg: 'tolong',
+  gk: 'tidak', ga: 'tidak', gak: 'tidak', nggak: 'tidak', ngga: 'tidak', tdk: 'tidak',
+  udh: 'sudah', sdh: 'sudah', udah: 'sudah', bsk: 'besok', jd: 'jadi',
+  gmn: 'bagaimana', bgmn: 'bagaimana', dmn: 'dimana', knp: 'kenapa',
+  yg: 'yang', dgn: 'dengan', utk: 'untuk', kpn: 'kapan',
+  trims: 'terima kasih', tks: 'terima kasih', thx: 'thanks',
+};
+
+const base = (text) =>
+  String(text ?? '')
+    .toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '') // buang aksen
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/([a-z])\1{2,}/g, '$1') // "hargaaa" -> "harga"; "aa" tetap
+    .trim();
+
+/** Normalisasi: huruf kecil, tanpa aksen/tanda baca, huruf berulang dipadatkan, slang diganti. */
+export function normalizeText(text, slangMap = {}) {
+  const slang = { ...DEFAULT_SLANG };
+  for (const [k, v] of Object.entries(slangMap || {})) {
+    const key = base(k);
+    if (key) slang[key] = String(v ?? '').toLowerCase().trim(); // slangMap menang
+  }
+  return base(text)
+    .split(' ')
+    .filter(Boolean)
+    .map((t) => (Object.hasOwn(slang, t) ? slang[t] : t))
+    .filter(Boolean)
+    .join(' ');
+}
 
 /** Nomor telepon: digit saja, awalan 0 -> 62, 8-15 digit; selain itu null. */
 export function normPhone(p) {
@@ -17,11 +48,77 @@ export function isSkip(text) {
 
 const QUESTION_WORDS = new Set(['apa', 'apakah', 'bagaimana', 'gimana', 'berapa', 'dimana', 'kapan', 'bisa', 'boleh', 'ada', 'kenapa', 'mengapa', 'siapa']);
 
-export function isQuestion(text, intentMatched) {
-  if (String(text ?? '').includes('?') || intentMatched) return true;
+/** Pesan tampak seperti pertanyaan: ada tanda tanya, atau kata tanya di awal. Hanya dari teks. */
+export function isQuestion(text) {
+  if (String(text ?? '').includes('?')) return true;
   const tokens = normalizeText(text).split(' ').filter(Boolean);
   if (!tokens.length) return false;
   return QUESTION_WORDS.has(tokens[0]) || (tokens[0] === 'di' && tokens[1] === 'mana');
+}
+
+// ---- Salam (pembuka) ----
+// Bawaan sama dengan S.greetingWords bawaan (settings.js, B7); dipakai bila daftar tidak diberikan.
+export const DEFAULT_GREETING_WORDS = [
+  'halo', 'hallo', 'hai', 'hi', 'hello', 'hey', 'permisi', 'assalamualaikum', "assalamu'alaikum", 'salam',
+  'selamat pagi', 'selamat siang', 'selamat sore', 'selamat malam', 'pagi', 'siang', 'sore', 'malam', 'p',
+];
+
+// Sapaan pendamping yang tidak dihitung sebagai isi pertanyaan ("halo kak" = salam saja).
+const ADDRESS_WORDS = new Set(['kak', 'kakak', 'ka', 'kk', 'min', 'admin', 'mas', 'mba', 'mbak', 'bu', 'ibu', 'pak', 'bapak', 'om', 'tante', 'sis', 'ya', 'dong', 'nih', 'semua', 'semuanya']);
+
+// Daftar kata salam -> frasa token ternormalisasi (tanpa duplikat; kosong dibuang).
+function greetingPhrases(words) {
+  const list = Array.isArray(words) && words.length ? words : DEFAULT_GREETING_WORDS;
+  const seen = new Set();
+  const out = [];
+  for (const w of list) {
+    const tokens = base(w).split(' ').filter(Boolean);
+    const key = tokens.join(' ');
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(tokens);
+  }
+  return out;
+}
+
+const startsWithAt = (tokens, i, phrase) => i + phrase.length <= tokens.length && phrase.every((w, j) => tokens[i + j] === w);
+
+/**
+ * Pesan berisi salam: salah satu kata/frasa salam muncul seluruhnya di 3 kata pertama.
+ * "p" hanya dihitung bila seluruh pesan hanya "p". Teks dinormalkan dulu (huruf kecil, tanpa tanda baca).
+ */
+export function isGreeting(text, greetingWords) {
+  const tokens = base(text).split(' ').filter(Boolean);
+  if (!tokens.length) return false;
+  const head = tokens.slice(0, 3);
+  for (const phrase of greetingPhrases(greetingWords)) {
+    if (phrase.length === 1 && phrase[0] === 'p') {
+      if (tokens.length === 1 && tokens[0] === 'p') return true;
+      continue;
+    }
+    for (let i = 0; i < head.length; i++) if (startsWithAt(head, i, phrase)) return true;
+  }
+  return false;
+}
+
+/** Pesan HANYA salam (boleh dengan sapaan seperti "kak"/"min"), tanpa isi lain. */
+export function isGreetingOnly(text, greetingWords) {
+  const tokens = base(text).split(' ').filter(Boolean);
+  if (!tokens.length || !isGreeting(text, greetingWords)) return false;
+  const phrases = greetingPhrases(greetingWords).filter((p) => !(p.length === 1 && p[0] === 'p'));
+  if (tokens.length === 1 && tokens[0] === 'p') return true;
+  let i = 0;
+  let sawGreeting = false;
+  while (i < tokens.length) {
+    // frasa terpanjang lebih dulu supaya "selamat pagi" tidak terbaca "selamat" + sisa
+    const hit = phrases.filter((p) => startsWithAt(tokens, i, p)).sort((a, b) => b.length - a.length)[0];
+    if (hit) {
+      sawGreeting = true;
+      i += hit.length;
+    } else if (ADDRESS_WORDS.has(tokens[i])) i++;
+    else return false;
+  }
+  return sawGreeting;
 }
 
 const no = (reason) => ({ ok: false, value: null, reason });
@@ -40,7 +137,7 @@ function validName(text) {
   if (t.length < 2 || t.length > 60) return no('Nama harus 2-60 karakter. Boleh tulis nama Anda?');
   if (!/\p{L}/u.test(t)) return no('Nama harus berisi huruf. Boleh tulis nama Anda?');
   if (t.split(' ').length > 6) return no('Nama terlalu panjang. Cukup tulis nama panggilan Anda.');
-  if (isQuestion(t, false)) return no('Sepertinya itu pertanyaan. Boleh kami tahu nama Anda dulu?');
+  if (isQuestion(t)) return no('Sepertinya itu pertanyaan. Boleh kami tahu nama Anda dulu?');
   return yes(t);
 }
 

@@ -1,6 +1,6 @@
 # PROJECT STATUS — WA-AMN (amnan-live 0.2.0)
 
-Diperbarui: 14 November 2026
+Diperbarui: 16 November 2026
 
 ## Ringkasan kondisi
 Dashboard CRM + bot WhatsApp (Baileys) satu client per proses. Server Node 22 ESM tanpa framework, SQLite (`better-sqlite3`) + JSON, frontend vanilla ES module. Di working tree ada pekerjaan yang belum di-commit: tahap Hot Lead (`hotStage`) dan pengiriman data ke Acesio. Pekerjaan itu setengah jadi dan merusak lint; sesi ini menyelesaikannya.
@@ -83,3 +83,29 @@ Alternatif dari Baileys lewat WhatsApp Business API resmi (Convia). Bawaan tetap
 
 ### File berubah (sesi S7)
 `test/convia-e2e.test.js` (baru), `docs/INTEGRASI-CONVIA.md` (baru), `docs/E2E-CONVIA.md` (baru), `.env.example` (blok Convia), `PROJECT_STATUS.md` (bagian ini).
+
+## Balasan AI (Baileys) (16 Nov 2026)
+Pengganti intent dan kamus bahasa gaul: bot menjawab pertanyaan bebas dari basis pengetahuan lewat penyedia AI (`anthropic`, `openai`, `gemini`, `openai-compatible`). **Mati secara bawaan.** Cara pakai dan privasi: `docs/AI-BALASAN.md`. Bukti uji dan runbook: `docs/E2E-AI.md`.
+
+- **Modul:** `src/ai-providers.js` (B1), `ai-knowledge.js` (B2), `ai-quota.js` (B3), `ai-reply.js` (B4), `ai-secret.js` dan `api/ai.js` (B7), `phone.js` (C1); `bot-plan.js`/`bot-validate.js` (B5), `bot-pipeline.js`/`bot-tester.js` (B6), UI `pengaturan.js` (B8), `pesan.js`/`lib.js` (B9), `leads.js`/`api/crm.js` (C2), `crm.js` UI (C3).
+- **Aturan bisnis:** pembuka untuk nomor baru atau salam; pertanyaan referensi (maks 3 kali, bisa dilewati); `waName` dari pushName; kirim ke Acesio hanya bila phone, referensi, dan nama lengkap; `replayed` tidak dianggap kiriman baru. Mode API resmi disembunyikan dari UI; backend dan tesnya utuh.
+- **Kuota:** bulanan dan harian per customer (internal). Biaya nyata ada di penyedia AI dan naik dengan panjang basis pengetahuan.
+- **Bukti:** `test/ai-e2e.test.js` (30 lulus, 2 todo; server asli + penyedia AI, WhatsApp, Acesio palsu). `npm test` penuh di proyek gabungan: 741 tes, 733 lulus, **6 gagal** (di file sesi lain, lihat `docs/E2E-AI.md`), 2 todo. **Lint belum dijalankan** (eslint tidak terpasang di lingkungan sesi). Semua MOCK; uji REAL **BLOCKED** sampai ada API key penyedia AI.
+
+### Sisa risiko Balasan AI
+| Risiko | Tingkat | Catatan |
+|---|---|---|
+| Bentuk API penyedia (terutama `anthropic`, `openai`, `gemini`) belum diuji nyata; hanya `openai-compatible` dijalankan end-to-end, itu pun melawan server palsu | HIGH | Salah asumsi = semua balasan jatuh ke fallback (`ai_error`). Jalankan runbook di `docs/E2E-AI.md` |
+| Kualitas dan kebenaran jawaban bergantung pada model dan basis pengetahuan; aturan keras hanya instruksi ke model | HIGH | Pantau percakapan awal; isi basis pengetahuan seakurat mungkin |
+| Kuota tetap terpakai bila kirim WhatsApp gagal setelah AI sukses (kontrak meminta dilepas; B4 commit lebih dulu, refund B3 hanya melepas yang `reserved`) | MEDIUM | Tes `todo` di `test/ai-e2e.test.js`; butuh keputusan B3/B4/B6 |
+| Pesan customer saat ini terkirim dua kali di prompt | LOW | Boros token; tes `todo`; B4/B6 |
+| Cooldown bersama AI dan fallback (bawaan 30 menit): satu balasan AI per percakapan per 30 menit | MEDIUM | Atur `fallbackCooldownMinutes` ke 0 bila ingin menjawab tiap pertanyaan |
+| Tanpa `DATA_KEY`, kunci AI tersimpan sebagai teks biasa (izin 0600) | MEDIUM | Isi `DATA_KEY` di produksi |
+| Isi pesan customer (dan riwayat) dikirim ke penyedia AI | MEDIUM | Nomor dan nama tidak dikirim (teruji). Sesuaikan kebijakan privasi |
+| Biaya penyedia tidak dibatasi kuota internal | MEDIUM | Pasang batas pengeluaran di akun penyedia |
+| AI nonaktif + nomor baru yang bertanya: tanpa fallback; AI aktif tanpa kunci: fallback dikirim | LOW | Perilaku tidak seragam |
+| API resmi (Convia) ditunda: disembunyikan dari Pengaturan, hanya aktif lewat `.env`/data lama; bagian "Opsi API Resmi" di atas yang menyebut pilihan di Pengaturan sudah usang | LOW | Backend utuh dan teruji MOCK |
+| 6 tes gagal di `bot-pipeline.test.js` (fixture `nama`), `crm-api.test.js:229`, `integration-alur.test.js:45` | MEDIUM | Milik B6, C2/B7, dan integrasi; belum diperbaiki |
+
+### File berubah (sesi B10)
+`test/ai-e2e.test.js` (baru), `docs/AI-BALASAN.md` (baru), `docs/E2E-AI.md` (baru), `.env.example` (blok `AI_API_KEY`), `PROJECT_STATUS.md` (bagian ini).

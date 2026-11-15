@@ -1,10 +1,12 @@
 // Bot Tester: memakai processIncoming yang SAMA dengan jalur nyata, tetapi dengan deps in-memory
 // (tanpa CRM asli, tanpa WhatsApp). Tiap nomor uji punya percakapan, lead virtual, dan jam simulasi sendiri.
+// ASUMSI 6: AI di tester memakai jalur yang sama dan MEMAKAI kuota bulanan; simulate.aiFail memaksa galat AI
+// tanpa memanggil AI dan tanpa kuota.
 import { randomBytes } from 'node:crypto';
 import * as convStore from './conversations.js';
 import * as settingsStore from './settings.js';
 import { classify, markTransactionDone } from './leads.js';
-import { processIncoming } from './bot-pipeline.js';
+import { processIncoming, makeRealAi } from './bot-pipeline.js';
 import { setMode, remainingMs, adminReturnMs } from './bot-plan.js';
 
 const LABEL = {
@@ -17,6 +19,10 @@ export function createTester(over = {}) {
   const classifyFn = over.classify || classify;
   const markDone = over.markTransactionDone || markTransactionDone;
   const newConv = over.newConv || convStore.newConv;
+  // AI + kuota: bawaan = modul nyata (dimuat malas, hanya bila AI aktif); tes menyuntikkan tiruan lewat over.ai/over.quota.
+  const real = over.ai ? null : makeRealAi({ getSettings: () => settings.get() });
+  const aiImpl = over.ai || real.ai;
+  const quotaImpl = over.quota || real?.quota;
   const testers = new Map(); // nomor -> {convs, lead, offset, sendFail}
   let seq = 0;
 
@@ -32,7 +38,7 @@ export function createTester(over = {}) {
   function T(phone) {
     if (testers.has(phone)) return testers.get(phone);
     const store = new Map();
-    const t = { phone, lead: null, offset: 0, sendFail: false };
+    const t = { phone, lead: null, offset: 0, sendFail: false, aiFail: false };
     t.convs = {
       get: (k) => store.get(k),
       getOrCreate(k, jid, name) {
@@ -73,7 +79,10 @@ export function createTester(over = {}) {
       },
       settings,
       emit: () => {},
+      ai: { reply: async (args) => (t.aiFail ? { ok: false, reason: 'error', detail: 'simulasi' } : aiImpl.reply(args)) },
+      quota: quotaImpl,
     };
+    if (over.plan) t.deps.plan = over.plan;
     testers.set(phone, t);
     return t;
   }
@@ -87,12 +96,15 @@ export function createTester(over = {}) {
   async function run(t, msg) {
     const S = settings.get();
     t.sendFail = !!msg._sendFail;
+    t.aiFail = !!msg._aiFail;
     delete msg._sendFail;
+    delete msg._aiFail;
     const r = await processIncoming(msg, t.deps);
     const conv = t.convs.get(t.phone);
     return {
       message: r?.message || null, replies: r?.replies || [], lead: t.lead, changes: r?.changes || [],
       data: conv.data, status: status(t, S), now: tnow(t), needsAttention: !!conv.needsAttention,
+      attentionReason: conv.attentionReason || '',
     };
   }
 
@@ -103,7 +115,7 @@ export function createTester(over = {}) {
       return {
         phone, messages: c ? c.messages : [], status: t ? status(t, S) : { mode: 'bot', remainingMs: null, botEnabled: S.botEnabled },
         lead: t?.lead || null, data: c ? c.data : {}, now: t ? tnow(t) : Date.now(), offset: t?.offset || 0,
-        needsAttention: !!c?.needsAttention, numbers: [...testers.keys()],
+        needsAttention: !!c?.needsAttention, attentionReason: c?.attentionReason || '', numbers: [...testers.keys()],
         leads: [...testers].filter(([, x]) => x.lead).map(([ph, x]) => ({ ...x.lead, phone: ph, data: x.convs.get(ph).data })),
       };
     },
@@ -114,7 +126,7 @@ export function createTester(over = {}) {
       const media = kind !== 'text';
       const cap = media ? String(text || '').trim() : '';
       return run(t, envelope(t, {
-        ts, kind, caption: cap, text: media ? ((LABEL[kind] || '[Media]') + (cap ? ' ' + cap : '')) : text, _sendFail: !!simulate.sendFail,
+        ts, kind, caption: cap, text: media ? ((LABEL[kind] || '[Media]') + (cap ? ' ' + cap : '')) : text, _sendFail: !!simulate.sendFail, _aiFail: !!simulate.aiFail,
       }));
     },
     testerReset: (phone) => (phone ? testers.delete(phone) : testers.clear()),

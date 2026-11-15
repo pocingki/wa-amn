@@ -36,7 +36,7 @@ function pipelineDeps(o = {}) {
       sent.push(text);
       return { waId: 'out' + sent.length };
     },
-    settings: { get: () => S },
+    settings: { get: () => o.S || S },
     emit: () => {},
     ingest: (p) => {
       if (o.ingestFail?.()) throw new Error('ingest rusak');
@@ -65,6 +65,9 @@ function pipelineDeps(o = {}) {
       totalUnread: () => 0,
     },
   };
+  if (o.ai) d.ai = o.ai;
+  if (o.quota) d.quota = o.quota;
+  if (o.plan) d.plan = o.plan;
   return { d, st, sent, ingests, saves };
 }
 
@@ -155,7 +158,7 @@ test('kirim balasan gagal: pesan pelanggan tetap ada, balasan bertanda failed + 
 
 test('retry setelah balasan terkirim tetapi langkah akhir gagal: tidak ada balasan ganda', async () => {
   let calls = 0;
-  const h = harness({ findFail: () => ++calls === 2 }); // panggilan ke-2 = sinkron lead setelah balasan terkirim
+  const h = harness({ findFail: () => ++calls === 4 }); // panggilan ke-4 = sinkron lead setelah balasan terkirim (1 nomor baru, 2 ctx, 3 setelah kirim)
   await h.f.handleMessage(h.raw('W6'));
   assert.deepEqual(h.sent, ['Halo']); // hanya satu kali
   assert.equal(h.st.get('6281').messages.filter((m) => m.by === 'bot').length, 1);
@@ -183,6 +186,65 @@ test('pesan duplikat: id sama (sudah seen, sedang diproses, atau pengiriman ulan
   assert.equal(r.duplicate, true);
   assert.deepEqual(h.sent, ['Halo']);
   assert.equal(h.st.get('6281').unread, 1);
+});
+
+// ---- AI lewat fasad + pipeline asli (MOCK AI; bukan bukti berhasil dengan penyedia nyata) ----
+const SAI = { ...S, fallbackMessage: 'Diteruskan ke admin.', ai: { enabled: true, quotaExhaustedMessage: 'Kuota habis.', errorMessage: 'Maaf, ada gangguan.' } };
+const aiPlan = () => ({ replies: [{ kind: 'ai', needsAi: true, text: '', commit: () => {} }], attention: null, ignored: false });
+const mkAi = (results = [{ ok: true, text: 'Jawaban AI', usage: {} }]) => {
+  const calls = [], q = [...results];
+  return { calls, reply: async (a) => { calls.push(a); return q.length > 1 ? q.shift() : q[0]; } };
+};
+const mkQuota = () => { const refunds = []; return { refunds, refund: (k) => void refunds.push(k) }; };
+
+test('AI berhasil: dibalas, baru ditandai seen setelah handled; AI dipanggil sekali', async () => {
+  const ai = mkAi(), h = harness({ S: SAI, ai, plan: aiPlan });
+  await h.f.handleMessage(h.raw('A1'));
+  assert.deepEqual(h.sent, ['Jawaban AI']);
+  assert.equal(ai.calls.length, 1);
+  assert.deepEqual(h.timeline[0], { ev: 'seen', id: 'A1', handled: true, sent: 1 });
+  assert.equal(h.st.get('6281').messages.find((m) => m.by === 'customer').aiText, 'Jawaban AI');
+});
+
+test('AI berhasil lalu sinkron lead gagal sesaat: retry tidak memanggil AI lagi dan tidak membalas ganda', async () => {
+  let calls = 0;
+  const ai = mkAi(), h = harness({ S: SAI, ai, plan: aiPlan, findFail: () => ++calls === 4 });
+  await h.f.handleMessage(h.raw('A2'));
+  assert.equal(ai.calls.length, 1);
+  assert.deepEqual(h.sent, ['Jawaban AI']);
+  assert.equal(h.st.get('6281').messages.filter((m) => m.by === 'bot').length, 1);
+  assert.equal(h.seen.has('A2'), true);
+});
+
+test('galat pipeline sebelum AI (ingest gagal sesaat): setelah pulih AI dipanggil tepat sekali', async () => {
+  let fails = 1;
+  const ai = mkAi(), h = harness({ S: SAI, ai, plan: aiPlan, ingestFail: () => fails-- > 0 });
+  await h.f.handleMessage(h.raw('A3'));
+  assert.equal(ai.calls.length, 1);
+  assert.deepEqual(h.sent, ['Jawaban AI']);
+  assert.equal(h.seen.has('A3'), true);
+});
+
+test('AI galat/kuota habis tidak mengganggu F-01: pesan tetap handled, seen, dan perlu perhatian', async () => {
+  for (const [res, reason, text] of [[{ ok: false, reason: 'error' }, 'ai_error', 'Maaf, ada gangguan.'], [{ ok: false, reason: 'quota' }, 'ai_quota', 'Kuota habis.']]) {
+    const h = harness({ S: SAI, ai: mkAi([res]), plan: aiPlan });
+    await h.f.handleMessage(h.raw('A4'));
+    const conv = h.st.get('6281');
+    assert.deepEqual(h.sent, [text]);
+    assert.equal(conv.attentionReason, reason);
+    assert.equal(conv.messages.find((m) => m.by === 'customer').handled, true);
+    assert.equal(h.seen.has('A4'), true);
+  }
+});
+
+test('kirim gagal setelah AI sukses: kuota dilepas, balasan failed, pesan tetap seen', async () => {
+  const quota = mkQuota(), h = harness({ S: SAI, ai: mkAi(), quota, plan: aiPlan, sendFail: true });
+  await h.f.handleMessage(h.raw('A5'));
+  assert.deepEqual(quota.refunds, ['A5']);
+  const conv = h.st.get('6281');
+  assert.equal(conv.messages.find((m) => m.by === 'bot').status, 'failed');
+  assert.equal(conv.attentionReason, 'send_failed');
+  assert.equal(h.seen.has('A5'), true);
 });
 
 // ---- DB nyata: durabilitas dan antrean pipeline asli ----

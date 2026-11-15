@@ -762,7 +762,7 @@ export function restoreSettings(version) {
   return enqueue(async () => {
     const res = await send('/api/settings/restore', { version });
     const s = unwrapSettings(res);
-    if (s && Array.isArray(s.intents)) SK.cur = s; else await loadSettings();
+    if (s && Array.isArray(s.knowledge)) SK.cur = s; else await loadSettings();
     emitSettings('restore');
     return SK.cur;
   });
@@ -804,196 +804,123 @@ export async function openSettingsHistory() {
 }
 
 /* ====================================================================
-   Fungsi murni untuk intent, impor CSV/JSON, kamus gaul, data wajib
+   Fungsi murni untuk basis pengetahuan (impor/ekspor Markdown) dan data wajib
    ==================================================================== */
-export const INTENT_LIMIT = 300;
-const KW_SPLIT = /[,;|\n]/;
+export const KNOWLEDGE_LIMITS = { entries: 200, entryChars: 20000, totalChars: 200000 };
 const normName = (s) => String(s ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
-export const normKw = (s) => String(s ?? '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ').trim();
-
-/** "a, b|c" atau array -> daftar unik, huruf kecil. */
-export function parseKeywords(v) {
-  const arr = Array.isArray(v) ? v : String(v ?? '').split(KW_SPLIT);
-  return [...new Set(arr.map((k) => String(k).trim().toLowerCase()).filter(Boolean))];
-}
 
 export function parseOptions(v) {
   const arr = Array.isArray(v) ? v : String(v ?? '').split(/[,;|\n]/);
   return [...new Set(arr.map((k) => String(k).trim()).filter(Boolean))];
 }
 
-/** Kata kunci yang bentrok antar-intent. Mengembalikan Map<indeks, [{keyword, other, otherKeyword, kind:'sama'|'tumpang'}]>. */
-export function keywordConflicts(intents, { onlyActive = true } = {}) {
-  const owners = new Map(); // kw ternormalisasi -> Set indeks intent
-  intents.forEach((it, i) => {
-    if (onlyActive && it.active === false) return;
-    for (const k of it.keywords || []) {
-      const n = normKw(k);
-      if (!n) continue;
-      if (!owners.has(n)) owners.set(n, new Set());
-      owners.get(n).add(i);
-    }
-  });
-  const out = new Map();
-  const add = (i, rec) => {
-    const l = out.get(i) || [];
-    if (l.length < 6 && !l.some((x) => x.keyword === rec.keyword && x.other === rec.other && x.kind === rec.kind)) l.push(rec);
-    out.set(i, l);
+/** ID entri baru (dibuat di browser). Acak bisa disuntik supaya tes deterministik. */
+export function newKnowledgeId(rand = Math.random, now = Date.now) {
+  return 'k' + now().toString(36) + Math.floor(rand() * 36 ** 6).toString(36).padStart(6, '0');
+}
+
+/** Ringkasan pemakaian: jumlah entri, entri aktif, total karakter (judul tidak dihitung). */
+export function knowledgeStats(entries) {
+  const list = Array.isArray(entries) ? entries : [];
+  return {
+    count: list.length,
+    enabled: list.filter((e) => e.enabled !== false).length,
+    chars: list.reduce((n, e) => n + String(e.content ?? '').length, 0),
   };
-  intents.forEach((it, i) => {
-    if (onlyActive && it.active === false) return;
-    for (const k of it.keywords || []) {
-      const n = normKw(k);
-      if (!n) continue;
-      for (const j of owners.get(n) || []) if (j !== i) add(i, { keyword: k, other: intents[j].name, otherKeyword: k, kind: 'sama' });
-      const w = n.split(' ');
-      if (w.length < 2) continue;
-      for (let a = 0; a < w.length; a++) {
-        for (let b = a + 1; b <= w.length; b++) {
-          if (b - a === w.length) continue; // seluruh frasa sudah dicek di atas
-          const sub = w.slice(a, b).join(' ');
-          for (const j of owners.get(sub) || []) {
-            if (j === i) continue;
-            add(i, { keyword: k, other: intents[j].name, otherKeyword: sub, kind: 'tumpang' });
-            add(j, { keyword: sub, other: it.name, otherKeyword: k, kind: 'tumpang' });
-          }
-        }
-      }
-    }
-  });
-  return out;
 }
 
-export const conflictText = (c) => (c.kind === 'sama'
-  ? `Kata kunci "${c.keyword}" juga dipakai intent "${c.other}"`
-  : `"${c.keyword}" tumpang tindih dengan "${c.otherKeyword}" di intent "${c.other}"`);
+export const fmtNum = (n) => Number(n || 0).toLocaleString('id-ID');
 
-/* ---- CSV ---- */
-export function parseCSVRows(text) {
-  const src = String(text ?? '').replace(/^\uFEFF/, '');
-  const first = src.split(/\r?\n/, 1)[0];
-  const d = (first.match(/;/g) || []).length > (first.match(/,/g) || []).length ? ';' : ',';
-  const rows = [];
-  let row = [], cur = '', q = false, line = 1, start = 1;
-  for (let i = 0; i < src.length; i++) {
-    const c = src[i];
-    if (q) {
-      if (c === '"') { if (src[i + 1] === '"') { cur += '"'; i++; } else q = false; }
-      else { if (c === '\n') line++; cur += c; }
-    } else if (c === '"') q = true;
-    else if (c === d) { row.push(cur); cur = ''; }
-    else if (c === '\n' || c === '\r') {
-      if (c === '\r' && src[i + 1] === '\n') i++;
-      row.push(cur); cur = '';
-      rows.push({ line: start, cells: row });
-      row = []; line++; start = line;
-    } else cur += c;
-  }
-  const unterminated = q;
-  if (cur || row.length) { row.push(cur); rows.push({ line: start, cells: row }); }
-  return { rows: rows.filter((r) => r.cells.some((x) => x.trim())), delimiter: d, unterminated };
-}
-
-/** Cegah formula injection di Excel saat ekspor; dibuka lagi saat impor. */
-export const csvCell = (v) => {
-  let s = String(v ?? '');
-  if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
-  return '"' + s.replace(/"/g, '""') + '"';
-};
-const unguard = (s) => (/^'[=+\-@]/.test(s) ? s.slice(1) : s);
-export const toCSV = (header, rows) => [header.join(','), ...rows.map((r) => r.map(csvCell).join(','))].join('\r\n');
-
-const HEAD = {
-  name: ['intent', 'nama', 'name'], kw: ['kata_kunci', 'kata kunci', 'keywords', 'keyword'],
-  res: ['respons', 'response', 'jawaban'], act: ['aktif', 'active'], pri: ['prioritas', 'priority'],
-};
-const isOff = (v) => /^(0|tidak|no|false|nonaktif|off)$/i.test(String(v ?? '1').trim());
-
-/** -> {items:[{line,name,keywords,response,active,priority|null}], errors:[{line,msg}]} */
-export function intentsFromCSV(text) {
-  const { rows, unterminated } = parseCSVRows(text);
-  const errors = [];
-  if (unterminated) errors.push({ line: 0, msg: 'Ada tanda kutip (") yang tidak ditutup; baris sesudahnya bisa salah terbaca.' });
-  if (!rows.length) return { items: [], errors };
-  const head = rows[0].cells.map((h) => h.trim().toLowerCase());
-  const col = (names) => head.findIndex((h) => names.includes(h));
-  let iN = col(HEAD.name), iK = col(HEAD.kw), iR = col(HEAD.res), iA = col(HEAD.act), iP = col(HEAD.pri);
-  let body = rows.slice(1);
-  if (iN < 0 || iR < 0) { iN = 0; iK = 1; iR = 2; iA = 3; iP = 4; body = rows; } // tanpa header: intent, kata kunci, respons, aktif, prioritas
-  const items = body.map((r) => {
-    const g = (i) => (i >= 0 ? unguard(String(r.cells[i] ?? '').trim()) : '');
-    return { line: r.line, name: g(iN), keywords: parseKeywords(g(iK)), response: g(iR), active: !isOff(g(iA) || '1'), priority: g(iP) === '' ? null : g(iP) };
-  });
-  return { items, errors };
-}
-
-/** -> {items, errors}; melempar Error ramah bila JSON rusak. */
-export function intentsFromJSON(text) {
-  let d;
-  try { d = JSON.parse(String(text ?? '').replace(/^\uFEFF/, '')); } catch (e) { throw new Error('File JSON tidak valid: ' + e.message); }
-  const arr = Array.isArray(d) ? d : d?.intents;
-  if (!Array.isArray(arr)) throw new Error('JSON harus berupa array intent, atau objek dengan properti "intents".');
-  const items = arr.map((x, i) => {
-    const o = x && typeof x === 'object' ? x : {};
-    const pr = o.priority ?? o.prioritas;
-    return {
-      line: i + 1, name: String(o.name ?? o.intent ?? '').trim(), keywords: parseKeywords(o.keywords ?? o.kata_kunci ?? ''),
-      response: String(o.response ?? o.respons ?? '').trim(), active: o.active ?? o.aktif ?? true, priority: pr === undefined || pr === '' ? null : pr,
-    };
-  });
-  return { items, errors: [] };
-}
-
-/** Pesan alasan bila item tidak valid, '' bila valid. Batas mengikuti validasi server. */
-export function validateImportItem(it) {
-  if (!it.name) return 'Nama intent kosong';
-  if (it.name.length > 80) return 'Nama intent lebih dari 80 karakter';
-  if (!it.response) return 'Respons kosong';
-  if (it.response.length > 2000) return 'Respons lebih dari 2000 karakter';
-  if (it.keywords.length > 50) return 'Kata kunci lebih dari 50';
-  const long = it.keywords.find((k) => k.length > 60);
-  if (long) return `Kata kunci "${long.slice(0, 20)}…" lebih dari 60 karakter`;
-  if (it.priority != null) {
-    const n = Number(it.priority);
-    if (!Number.isInteger(n) || n < 0 || n > 100) return 'Prioritas harus bilangan bulat 0-100';
-  }
+/** Pesan alasan bila daftar melebihi batas jumlah entri atau total karakter, '' bila aman. */
+export function knowledgeLimitError(list, limits = KNOWLEDGE_LIMITS) {
+  const st = knowledgeStats(list);
+  if (st.count > limits.entries) return `Maksimal ${limits.entries} entri`;
+  if (st.chars > limits.totalChars) return `Total isi melebihi batas ${limits.totalChars} karakter`;
   return '';
 }
 
+/** Pesan alasan bila judul/isi tidak valid, '' bila valid. Batas mengikuti kontrak Setting. */
+export function validateKnowledgeEntry(e) {
+  const title = String(e?.title ?? '').trim();
+  const content = String(e?.content ?? '').trim();
+  if (!title) return 'Judul kosong';
+  if (!content) return 'Isi kosong';
+  if (content.length > KNOWLEDGE_LIMITS.entryChars) return `Isi lebih dari ${KNOWLEDGE_LIMITS.entryChars} karakter`;
+  return '';
+}
+
+/** Cari di judul dan isi (tanpa peka huruf besar/kecil). Urutan asli dipertahankan. */
+export function filterKnowledge(entries, query) {
+  const q = String(query ?? '').trim().toLowerCase();
+  const list = Array.isArray(entries) ? entries : [];
+  if (!q) return list;
+  return list.filter((e) => `${e.title ?? ''}\n${e.content ?? ''}`.toLowerCase().includes(q));
+}
+
+// Baris yang diawali "# " selalu judul baru. Di isi, baris seperti itu diberi garis miring terbalik saat ekspor.
+const HEADING = /^#[ \t]+(.+?)[ \t]*$/;
+const ESCAPED_HEADING = /^\\+#[ \t]/;
+const SINGLE_LINE = (s) => String(s ?? '').replace(/\s*[\r\n]+\s*/g, ' ').trim();
+
 /**
- * Pratinjau impor. mode: 'add' (lewati duplikat) | 'update' (perbarui duplikat) | 'replace' (ganti semua).
- * -> {rows:[{line,name,state:'baru'|'duplikat'|'error',reason}], counts, result: daftar intent hasil akhir}
+ * Pisahkan teks Markdown/teks biasa per baris "# Judul".
+ * -> {items:[{line,title,content}], errors:[{line,msg}]}; teks sebelum judul pertama dilaporkan, bukan dibuang diam-diam.
  */
-export function previewIntentImport(existing, items, mode = 'add', max = INTENT_LIMIT) {
-  const base = mode === 'replace' ? [] : existing.map((x) => ({ ...x }));
-  const byName = new Map(base.map((x, i) => [normName(x.name), i]));
-  const seenInFile = new Map();
+export function knowledgeFromText(text) {
+  const lines = String(text ?? '').replace(/^﻿/, '').split(/\r\n|\r|\n/);
+  const items = [], errors = [];
+  let cur = null, stray = 0, strayLine = 0;
+  const close = () => { if (cur) { cur.content = cur.buf.join('\n').trim(); delete cur.buf; items.push(cur); cur = null; } };
+  lines.forEach((raw, i) => {
+    const m = raw.match(HEADING);
+    if (m) { close(); cur = { line: i + 1, title: m[1].replace(/[ \t]+#+$/, '').trim(), buf: [] }; return; }
+    const ln = ESCAPED_HEADING.test(raw) ? raw.slice(1) : raw;
+    if (cur) cur.buf.push(ln);
+    else if (raw.trim()) { if (!stray) strayLine = i + 1; stray++; }
+  });
+  close();
+  if (stray) errors.push({ line: strayLine, msg: 'Ada teks sebelum judul pertama; teks itu diabaikan. Awali tiap bagian dengan baris "# Judul".' });
+  return { items, errors };
+}
+
+/**
+ * Pratinjau impor. mode: 'add' (lewati judul yang sama) | 'update' (perbarui judul yang sama) | 'replace' (ganti semua).
+ * -> {rows:[{line,title,state:'baru'|'duplikat'|'error',reason}], counts, result: daftar akhir}. Entri baru memakai idGen().
+ */
+export function previewKnowledgeImport(existing, items, mode = 'add', idGen = newKnowledgeId, limits = KNOWLEDGE_LIMITS) {
+  const result = mode === 'replace' ? [] : (existing || []).map((x) => ({ ...x }));
+  const byTitle = new Map(result.map((x, i) => [normName(x.title), i]));
+  const seen = new Map();
   const rows = [];
-  const counts = { baru: 0, duplikat: 0, error: 0 };
-  const result = base;
+  const counts = { baru: 0, duplikat: 0, error: 0, diperbarui: 0 };
+  let total = knowledgeStats(result).chars;
   for (const it of items) {
-    const key = normName(it.name);
-    const row = { line: it.line, name: it.name, state: 'baru', reason: '' };
-    const bad = validateImportItem(it);
+    const key = normName(it.title);
+    const title = String(it.title ?? '').trim(), content = String(it.content ?? '').trim();
+    const row = { line: it.line, title, state: 'baru', reason: '' };
+    const bad = validateKnowledgeEntry({ title, content });
     if (bad) { row.state = 'error'; row.reason = bad; }
-    else if (seenInFile.has(key)) { row.state = 'duplikat'; row.reason = `Sama dengan baris ${seenInFile.get(key)} di file ini; dilewati`; }
-    else if (byName.has(key)) {
+    else if (seen.has(key)) { row.state = 'duplikat'; row.reason = `Judul sama dengan baris ${seen.get(key)} di file ini; dilewati`; }
+    else if (byTitle.has(key)) {
+      const idx = byTitle.get(key);
       row.state = 'duplikat';
-      if (mode === 'update') {
-        const idx = byName.get(key);
-        const next = { ...result[idx], keywords: it.keywords, response: it.response, active: it.active };
-        if (it.priority != null) next.priority = Number(it.priority);
-        result[idx] = next;
-        row.reason = 'Intent yang sudah ada akan diperbarui';
-      } else row.reason = 'Sudah ada di daftar; dilewati';
-      seenInFile.set(key, it.line);
-    } else if (result.length >= max) { row.state = 'error'; row.reason = `Melebihi batas ${max} intent`; }
+      if (mode !== 'update') row.reason = 'Judul sudah ada; dilewati';
+      else if (total - String(result[idx].content ?? '').length + content.length > limits.totalChars) { row.state = 'error'; row.reason = `Melebihi batas total ${limits.totalChars} karakter`; }
+      else {
+        total += content.length - String(result[idx].content ?? '').length;
+        result[idx] = { ...result[idx], title, content };
+        row.reason = 'Entri yang sudah ada akan diperbarui';
+        row.updated = true;
+        counts.diperbarui++;
+      }
+      if (row.state === 'duplikat') seen.set(key, it.line);
+    } else if (result.length >= limits.entries) { row.state = 'error'; row.reason = `Melebihi batas ${limits.entries} entri`; }
+    else if (total + content.length > limits.totalChars) { row.state = 'error'; row.reason = `Melebihi batas total ${limits.totalChars} karakter`; }
     else {
-      const next = { name: it.name, keywords: it.keywords, response: it.response, active: it.active };
-      if (it.priority != null) next.priority = Number(it.priority);
-      result.push(next);
-      byName.set(key, result.length - 1);
-      seenInFile.set(key, it.line);
+      result.push({ id: idGen(), title, content, enabled: true });
+      byTitle.set(key, result.length - 1);
+      seen.set(key, it.line);
+      total += content.length;
       row.reason = 'Akan ditambahkan';
     }
     counts[row.state]++;
@@ -1002,27 +929,13 @@ export function previewIntentImport(existing, items, mode = 'add', max = INTENT_
   return { rows, counts, result };
 }
 
-/* ---- kamus bahasa gaul (slangMap) ---- */
-export function slangToText(map) {
-  return Object.entries(map || {}).map(([k, v]) => `${k} = ${v}`).join('\n');
-}
-/** "gak = tidak" per baris (boleh juga =>, ->, :). -> {map, errors:[{line,msg}]} */
-export function parseSlang(text, max = 500) {
-  const map = {}, errors = [];
-  String(text ?? '').split(/\r?\n/).forEach((raw, i) => {
-    const s = raw.trim();
-    if (!s || s.startsWith('#')) return;
-    const m = s.match(/^(.+?)\s*(?:=>|->|=|:)\s*(.+)$/);
-    const line = i + 1;
-    if (!m) return errors.push({ line, msg: 'Format harus "kata gaul = kata baku"' });
-    const k = m[1].trim().toLowerCase(), v = m[2].trim();
-    if (k.length > 40 || v.length > 60) return errors.push({ line, msg: 'Terlalu panjang (maks. 40 / 60 karakter)' });
-    if (k === v.toLowerCase()) return errors.push({ line, msg: 'Kata gaul dan kata baku sama' });
-    if (k in map) return errors.push({ line, msg: `Kata "${k}" muncul lebih dari sekali` });
-    if (Object.keys(map).length >= max) return errors.push({ line, msg: `Melebihi batas ${max} entri` });
-    map[k] = v;
-  });
-  return { map, errors };
+/** Ekspor sebagai Markdown ("# Judul" + isi). Entri nonaktif tetap ikut; status aktif tidak disimpan di berkas. */
+export function knowledgeToMarkdown(entries) {
+  return (entries || []).map((e) => {
+    const body = String(e.content ?? '').replace(/\r\n?/g, '\n').split('\n')
+      .map((l) => (/^\\*#[ \t]/.test(l) ? '\\' + l : l)).join('\n').trim();
+    return `# ${SINGLE_LINE(e.title)}\n\n${body}`;
+  }).join('\n\n') + (entries?.length ? '\n' : '');
 }
 
 export const FIELD_TYPES = { text: 'Teks bebas', name: 'Nama', phone: 'Nomor telepon', date: 'Tanggal', choice: 'Pilihan' };

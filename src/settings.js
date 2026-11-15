@@ -1,14 +1,26 @@
-// Pengaturan bot: nama, pesan, durasi, intent & respons, data wajib CRM, notifikasi.
+// Pengaturan bot: nama, pesan, durasi, kata salam, format nomor, pertanyaan referensi, AI + basis pengetahuan, notifikasi.
 // Versi + riwayat (maks 20) untuk deteksi konflik dan pemulihan.
+// Kunci API AI TIDAK ada di sini: disimpan terpisah di ai-secret.js (tidak masuk riwayat/publicView/audit).
 import { randomBytes } from 'node:crypto';
 import { load, save } from './jsonfile.js';
+import { hasAiKey } from './ai-secret.js';
 import { normalizeHex, checkBase } from '../public/assets/js/brand-color.js';
 
 const OPENING_LAMA = 'Halo {nama}, selamat datang. Saya {bot}, asisten virtual yang membantu {admin}. Ada yang bisa kami bantu?';
 const MASK = '••••';
 const HISTORY_MAX = 20;
-const FIELD_TYPES = ['text', 'name', 'phone', 'date', 'choice'];
 export const WA_PROVIDERS = ['baileys', 'convia'];
+export const AI_PROVIDERS = ['anthropic', 'openai', 'gemini', 'openai-compatible'];
+export const PHONE_FORMATS = ['digits', 'international'];
+// Batas basis pengetahuan (kontrak [Setting]). "Total" dihitung dari judul + isi semua entri.
+export const KNOWLEDGE_LIMITS = { entries: 200, title: 120, content: 20000, total: 200000 };
+const GREETING_LIMITS = { words: 100, chars: 40 };
+// [min, maks] angka pengaturan AI; nilai di luar rentang dipotong ke batas terdekat.
+const AI_RANGES = { maxHistory: [0, 30], maxReplyChars: [50, 2000], timeoutMs: [3000, 120000], monthlyQuota: [0, 1000000], perCustomerDailyLimit: [0, 1000] };
+const GREETING_DEFAULT = [
+  'halo', 'hallo', 'hai', 'hi', 'hello', 'hey', 'permisi', 'assalamualaikum', "assalamu'alaikum", 'salam',
+  'selamat pagi', 'selamat siang', 'selamat sore', 'selamat malam', 'pagi', 'siang', 'sore', 'malam', 'p',
+];
 export const CONVIA_WEBHOOK_PATH = '/webhooks/convia';
 
 export const DEFAULTS = {
@@ -37,19 +49,31 @@ export const DEFAULTS = {
   maxMediaMB: 16,
   retentionDays: 0, // 0 = simpan selamanya
   notify: { webhookUrl: '', telegramBotToken: '', telegramChatId: '', onHot: true, onDisconnected: true, attentionMinutes: 30 },
-  slangMap: {},
-  intents: [
-    { id: 'harga', name: 'Tanya harga', keywords: ['harga', 'biaya', 'tarif'], response: 'Untuk informasi harga, {admin} akan mengirimkan rinciannya. Mohon tunggu sebentar.', active: true, priority: 0 },
-    { id: 'terima-kasih', name: 'Terima kasih', keywords: ['terima kasih', 'makasih', 'thanks'], response: 'Sama-sama. Kami siap membantu kapan saja.', active: true, priority: 0 },
-    // Contoh nonaktif: isi respons lalu aktifkan.
-    { id: 'jadwal', name: 'Jadwal & jam buka', keywords: ['jadwal', 'jam buka', 'jam operasional'], response: '[ISI: jadwal dan jam buka]', active: false, example: true, priority: 0 },
-    { id: 'lokasi', name: 'Lokasi', keywords: ['lokasi', 'alamat', 'dimana', 'di mana'], response: '[ISI: alamat dan petunjuk arah]', active: false, example: true, priority: 0 },
-    { id: 'layanan', name: 'Layanan', keywords: ['layanan', 'treatment', 'terapi'], response: '[ISI: daftar layanan yang tersedia]', active: false, example: true, priority: 0 },
-    { id: 'cara-booking', name: 'Cara booking', keywords: ['booking', 'reservasi', 'daftar', 'janji'], response: '[ISI: langkah membuat janji/booking. Tulis {booking} untuk menyisipkan tautan jadwal pribadi, mis. "Silakan pilih jadwal di sini: {booking}"]', active: false, example: true, priority: 0 },
-  ],
+  // Kata salam: pesan nomor lama hanya memicu pembuka bila salah satunya muncul di 3 kata pertama ('p' hanya bila seluruh pesan).
+  greetingWords: [...GREETING_DEFAULT],
+  // Hanya tampilan nomor: 'digits' (6281381688802) | 'international' (+62 813-8168-8802).
+  phoneFormat: 'digits',
+  // Balasan AI. Kunci API ada di ai-secret.js, bukan di sini.
+  ai: {
+    enabled: false,
+    provider: 'anthropic',
+    baseUrl: '',
+    model: '',
+    persona: '',
+    rules: '',
+    maxHistory: 10,
+    maxReplyChars: 600,
+    timeoutMs: 20000,
+    monthlyQuota: 1000,
+    perCustomerDailyLimit: 20,
+    quotaExhaustedMessage: 'Terima kasih, pesan Anda kami teruskan ke admin.',
+    errorMessage: '',
+  },
+  // Basis pengetahuan untuk AI: [{ id, title, content, enabled }] (batas di KNOWLEDGE_LIMITS).
+  knowledge: [],
+  // Hanya satu butir: pertanyaan referensi. Field lama (nama, nomor, dll.) dimigrasikan keluar; data lead tidak dihapus.
   requiredFields: [
-    { id: 'nama', label: 'Nama', question: 'Boleh kami tahu nama Anda?', enabled: true, type: 'name', options: [] },
-    { id: 'kebutuhan', label: 'Kebutuhan', question: 'Apa kebutuhan atau layanan yang Anda cari?', enabled: true, type: 'text', options: [] },
+    { id: 'referensi', type: 'text', enabled: true, question: 'Boleh tahu, Kakak mengetahui kami dari mana?' },
   ],
   version: 1,
   updatedAt: 0,
@@ -71,8 +95,8 @@ const err = (code, message, extra) => Object.assign(new Error(message), { code }
 function uniq(list) {
   const seen = new Set();
   for (const x of list) {
-    let id = x.id || slug(x.label || x.name);
-    while (!id || seen.has(id)) id = (slug(x.label || x.name) || 'item') + '-' + randomBytes(3).toString('hex');
+    let id = x.id || slug(x.label || x.name || x.title);
+    while (!id || seen.has(id)) id = (slug(x.label || x.name || x.title) || 'item') + '-' + randomBytes(3).toString('hex');
     x.id = id;
     seen.add(id);
   }
@@ -133,6 +157,108 @@ function checkWebhook(v) {
   return raw;
 }
 
+// ---- pengaturan AI ----
+// URL dasar penyedia (opsional; kosong = alamat bawaan penyedia). Boleh alamat lokal (mis. model di laptop),
+// tetapi tanpa kredensial/parameter/fragmen supaya tidak ada rahasia terselip di pengaturan yang terlihat browser.
+function checkAiBaseUrl(v) {
+  const full = String(v ?? '').trim();
+  if (full === '') return '';
+  const bad = () => err('VALIDATION', 'URL dasar AI tidak valid: gunakan http(s) tanpa kredensial, parameter, atau fragmen (maks 300 karakter).');
+  if (full.length > 300) throw bad();
+  let u;
+  try { u = new URL(full); } catch { throw bad(); }
+  if ((u.protocol !== 'http:' && u.protocol !== 'https:') || !u.hostname || u.username || u.password || u.search || u.hash) throw bad();
+  return full.replace(/\/+$/, '');
+}
+
+const oneLine = (v, max) => String(v ?? '').replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max);
+
+// strict=true (PUT/restore): nilai tak valid -> galat VALIDATION. strict=false (muat berkas): nilai tak valid diabaikan.
+// Hanya field yang dikenal yang dibaca: apa pun lain di `p` (mis. apiKey yang terselip) dibuang.
+function cleanAi(p, base, strict = true) {
+  const a = { ...base };
+  const src = p && typeof p === 'object' && !Array.isArray(p) ? p : {};
+  const fail = (e) => { if (strict) throw e; };
+  if ('enabled' in src) a.enabled = !!src.enabled;
+  if ('provider' in src) {
+    if (typeof src.provider === 'string' && AI_PROVIDERS.includes(src.provider.trim())) a.provider = src.provider.trim();
+    else fail(err('VALIDATION', `Penyedia AI tidak valid: pilih ${AI_PROVIDERS.join(', ')}.`));
+  }
+  if ('baseUrl' in src) {
+    try { a.baseUrl = checkAiBaseUrl(src.baseUrl); } catch (e) { fail(e); }
+  }
+  if ('model' in src) a.model = oneLine(src.model, 100); // teks bebas: bukan daftar tetap
+  if ('persona' in src) a.persona = str(src.persona, 2000);
+  if ('rules' in src) a.rules = str(src.rules, 4000);
+  for (const [k, [min, max]] of Object.entries(AI_RANGES)) {
+    if (k in src) a[k] = clampInt(src[k], min, max, DEFAULTS.ai[k]);
+  }
+  if ('quotaExhaustedMessage' in src) a.quotaExhaustedMessage = str(src.quotaExhaustedMessage, 1000) || DEFAULTS.ai.quotaExhaustedMessage;
+  if ('errorMessage' in src) a.errorMessage = str(src.errorMessage, 1000);
+  if (strict && a.enabled) {
+    if (!a.model) throw err('VALIDATION', 'Isi nama model sebelum mengaktifkan balasan AI.');
+    if (a.provider === 'openai-compatible' && !a.baseUrl) throw err('VALIDATION', "Penyedia 'openai-compatible' wajib mengisi URL dasar.");
+  }
+  return a;
+}
+
+const fmtNum = (n) => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+
+// Basis pengetahuan. strict=true: lebih dari batas -> galat VALIDATION (isi pengguna tidak dipotong diam-diam).
+// strict=false (muat berkas): entri rusak dibuang, kelebihan dipotong.
+function cleanKnowledge(list, strict = true) {
+  const L = KNOWLEDGE_LIMITS;
+  const errors = [];
+  const arr = Array.isArray(list) ? list : [];
+  if (strict && arr.length > L.entries) errors.push(`Maksimal ${L.entries} entri basis pengetahuan.`);
+  const out = [];
+  let total = 0;
+  arr.slice(0, L.entries).forEach((e, i) => {
+    const o = e && typeof e === 'object' ? e : {};
+    let title = oneLine(o.title, strict ? Infinity : L.title);
+    let content = String(o.content ?? '').replace(/\u0000/g, '').replace(/\r\n?/g, '\n').trim();
+    if (!strict) content = content.slice(0, L.content);
+    const n = i + 1;
+    if (!title) { if (strict) errors.push(`Entri ${n}: judul wajib diisi.`); return; }
+    if (!content) { if (strict) errors.push(`Entri ${n}: isi wajib diisi.`); return; }
+    if (title.length > L.title) errors.push(`Entri ${n}: judul maksimal ${L.title} karakter.`);
+    if (content.length > L.content) errors.push(`Entri ${n}: isi maksimal ${fmtNum(L.content)} karakter.`);
+    if (total + title.length + content.length > L.total) {
+      if (strict) errors.push(`Total basis pengetahuan maksimal ${fmtNum(L.total)} karakter.`);
+      return;
+    }
+    total += title.length + content.length;
+    out.push({ id: slug(o.id), title, content, enabled: o.enabled !== false });
+  });
+  if (strict && errors.length) throw err('VALIDATION', [...new Set(errors)].slice(0, 5).join(' '));
+  return uniq(out);
+}
+
+function cleanGreetingWords(v) {
+  const list = Array.isArray(v) ? v : String(v ?? '').split(/[,;\n]/);
+  const out = [];
+  for (const x of list) {
+    const w = String(x ?? '').toLowerCase().replace(/\s+/g, ' ').trim().slice(0, GREETING_LIMITS.chars);
+    if (w && !out.includes(w)) out.push(w);
+    if (out.length >= GREETING_LIMITS.words) break;
+  }
+  return out;
+}
+
+// Selalu tepat satu butir 'referensi'. Hanya butir ber-id 'referensi' yang dibaca; yang lain (field lama) dibuang
+// dan bila tidak ada, nilai `base` dipertahankan. Nilai di lead TIDAK disentuh di sini.
+function cleanRequired(list, base) {
+  const cur = base?.requiredFields?.[0] ?? DEFAULTS.requiredFields[0];
+  const d = DEFAULTS.requiredFields[0];
+  const item = Array.isArray(list) ? list.find((f) => f && typeof f === 'object' && slug(f.id) === 'referensi') : null;
+  return [{
+    id: 'referensi',
+    type: 'text',
+    enabled: item ? item.enabled !== false : cur.enabled !== false,
+    question: item ? str(item.question, 500) || d.question : str(cur.question, 500) || d.question,
+  }];
+}
+
 // ---- pembersihan input ----
 function clean(p, base) {
   const o = {};
@@ -158,17 +284,13 @@ function clean(p, base) {
   for (const [k, min, max] of [['botDurationMinutes', 0, 10080], ['adminAutoReturnMinutes', 0, 10080], ['staleMinutes', 1, 1440], ['fallbackCooldownMinutes', 0, 1440], ['sendRateLimitPerMinute', 1, 120], ['maxMediaMB', 1, 64], ['retentionDays', 0, 3650]]) {
     if (k in p) o[k] = clampInt(p[k], min, max, DEFAULTS[k]);
   }
-  if ('slangMap' in p) {
-    const m = {};
-    if (p.slangMap && typeof p.slangMap === 'object' && !Array.isArray(p.slangMap)) {
-      for (const [a, b] of Object.entries(p.slangMap).slice(0, 200)) {
-        const k = str(a, 40).toLowerCase();
-        const v = str(b, 40).toLowerCase();
-        if (k && v) m[k] = v;
-      }
+  if ('phoneFormat' in p) {
+    if (typeof p.phoneFormat !== 'string' || !PHONE_FORMATS.includes(p.phoneFormat.trim())) {
+      throw err('VALIDATION', "Format nomor tidak valid: pilih 'digits' atau 'international'.");
     }
-    o.slangMap = m;
+    o.phoneFormat = p.phoneFormat.trim();
   }
+  if (Array.isArray(p.greetingWords) || typeof p.greetingWords === 'string') o.greetingWords = cleanGreetingWords(p.greetingWords);
   if (p.notify && typeof p.notify === 'object') {
     const n = p.notify;
     const x = { ...base.notify };
@@ -182,49 +304,80 @@ function clean(p, base) {
     if ('attentionMinutes' in n) x.attentionMinutes = clampInt(n.attentionMinutes, 1, 1440, DEFAULTS.notify.attentionMinutes);
     o.notify = x;
   }
-  if (Array.isArray(p.intents)) {
-    o.intents = uniq(
-      p.intents
-        .slice(0, 300)
-        .map((i) => ({
-          id: slug(i.id),
-          name: str(i.name, 80),
-          response: str(i.response, 2000),
-          active: i.active !== false,
-          priority: clampInt(i.priority, 0, 100, 0),
-          ...(i.example === true ? { example: true } : {}),
-          keywords: [...new Set((Array.isArray(i.keywords) ? i.keywords : String(i.keywords ?? '').split(/[,;|\n]/)).map((k) => str(k, 60).toLowerCase()).filter(Boolean))].slice(0, 50),
-        }))
-        .filter((i) => i.name && i.response)
-    );
+  if (p.ai && typeof p.ai === 'object' && !Array.isArray(p.ai)) o.ai = cleanAi(p.ai, base.ai, true);
+  if ('knowledge' in p) {
+    if (!Array.isArray(p.knowledge)) throw err('VALIDATION', 'Basis pengetahuan harus berupa daftar entri.');
+    o.knowledge = cleanKnowledge(p.knowledge, true);
   }
-  if (Array.isArray(p.requiredFields)) {
-    o.requiredFields = uniq(
-      p.requiredFields
-        .slice(0, 20)
-        .map((f) => {
-          const id = slug(f.id);
-          const type = FIELD_TYPES.includes(f.type) ? f.type : id === 'nama' ? 'name' : 'text';
-          const options = type === 'choice' && Array.isArray(f.options) ? [...new Set(f.options.map((x) => str(x, 60)).filter(Boolean))].slice(0, 20) : [];
-          return { id, label: str(f.label, 60), question: str(f.question, 500), enabled: f.enabled !== false, type, options };
-        })
-        .filter((f) => f.label && f.question)
-    );
-  }
+  if (Array.isArray(p.requiredFields)) o.requiredFields = cleanRequired(p.requiredFields, base);
   return o;
 }
 
-// ---- muat + migrasi file lama (tanpa menimpa intents/requiredFields pengguna) ----
+// ---- migrasi skema lama -> skema AI (intents/slangMap/requiredFields lama) ----
+// Intent lama jadi entri basis pengetahuan: judul = nama (atau kata kunci), isi = "Pertanyaan: <kata kunci>\nJawaban: <respons>".
+// Aturan: tidak menimpa data baru (entri yang id-nya sudah ada dipertahankan), idempoten (berjalan hanya bila kunci
+// lama masih ada di berkas), contoh bawaan yang belum diisi ("[ISI: ...]") tidak dipindahkan karena bukan isi pengguna.
+function intentsToKnowledge(intents, existing) {
+  const L = KNOWLEDGE_LIMITS;
+  const out = [...existing];
+  const ids = new Set(out.map((x) => x.id));
+  let total = out.reduce((n, x) => n + x.title.length + x.content.length, 0);
+  const r = { entries: out, moved: 0, kept: 0, skipped: 0, templates: 0 };
+  for (const i of intents) {
+    if (!i || typeof i !== 'object') continue;
+    const response = String(i.response ?? '').replace(/\u0000/g, '').trim();
+    if (!response) continue;
+    if (i.example === true && /^\[ISI:/.test(response)) { r.templates++; continue; }
+    const kws = (Array.isArray(i.keywords) ? i.keywords : String(i.keywords ?? '').split(/[,;|\n]/)).map((k) => oneLine(k, 60)).filter(Boolean);
+    const title = oneLine(i.name, L.title) || oneLine(kws.join(', '), L.title);
+    if (!title) continue;
+    const id = ('intent-' + (slug(i.id) || slug(i.name) || 'x')).slice(0, 40);
+    if (ids.has(id)) { r.kept++; continue; }
+    const content = `Pertanyaan: ${kws.length ? kws.join(', ') : title}\nJawaban: ${response}`.slice(0, L.content);
+    if (out.length >= L.entries || total + title.length + content.length > L.total) { r.skipped++; continue; }
+    total += title.length + content.length;
+    ids.add(id);
+    out.push({ id, title, content, enabled: i.active !== false });
+    r.moved++;
+  }
+  return r;
+}
+
+function migrateLegacy(saved) {
+  const data = { ...saved };
+  const notes = [];
+  if ('intents' in saved || 'slangMap' in saved) {
+    const m = intentsToKnowledge(Array.isArray(saved.intents) ? saved.intents : [], cleanKnowledge(saved.knowledge, false));
+    data.knowledge = m.entries;
+    delete data.intents;
+    delete data.slangMap;
+    let n = `${m.moved} intent lama dipindahkan ke basis pengetahuan; kamus bahasa gaul dihapus`;
+    if (m.templates) n += `; ${m.templates} contoh intent yang belum diisi dibuang`;
+    if (m.kept) n += `; ${m.kept} intent dilewati karena entri baru dengan id sama sudah ada`;
+    if (m.skipped) n += `; ${m.skipped} intent tidak muat di batas basis pengetahuan`;
+    notes.push(n);
+  }
+  if ('requiredFields' in saved) {
+    const canon = cleanRequired(saved.requiredFields, DEFAULTS);
+    if (JSON.stringify(canon) !== JSON.stringify(saved.requiredFields)) {
+      notes.push("data wajib disederhanakan menjadi satu butir 'referensi' (nilai di lead tidak dihapus)");
+    }
+    data.requiredFields = canon;
+  }
+  return { data, notes };
+}
+
+// ---- muat + normalisasi (tanpa menimpa pengaturan pengguna) ----
 function normalize(saved) {
   const s = { ...structuredClone(DEFAULTS), ...saved };
+  delete s.intents; // skema lama: sudah dimigrasikan ke knowledge
+  delete s.slangMap;
   s.notify = { ...DEFAULTS.notify, ...(saved.notify && typeof saved.notify === 'object' ? saved.notify : {}) };
-  s.slangMap = saved.slangMap && typeof saved.slangMap === 'object' ? saved.slangMap : {};
-  s.intents = (Array.isArray(s.intents) ? s.intents : []).map((i) => ({ ...i, priority: clampInt(i.priority, 0, 100, 0) }));
-  s.requiredFields = (Array.isArray(s.requiredFields) ? s.requiredFields : []).map((f) => ({
-    ...f,
-    type: FIELD_TYPES.includes(f.type) ? f.type : f.id === 'nama' ? 'name' : 'text',
-    options: Array.isArray(f.options) ? f.options : [],
-  }));
+  s.ai = cleanAi(saved.ai, DEFAULTS.ai, false);
+  s.knowledge = cleanKnowledge(saved.knowledge, false);
+  s.greetingWords = Array.isArray(saved.greetingWords) ? cleanGreetingWords(saved.greetingWords) : [...DEFAULTS.greetingWords];
+  s.phoneFormat = PHONE_FORMATS.includes(saved.phoneFormat) ? saved.phoneFormat : DEFAULTS.phoneFormat;
+  s.requiredFields = cleanRequired(saved.requiredFields, DEFAULTS);
   if (!WA_PROVIDERS.includes(s.waProvider)) s.waProvider = DEFAULTS.waProvider; // berkas lama/rusak -> bawaan
   s.version = Number.isInteger(saved.version) && saved.version >= 1 ? saved.version : 1;
   return s;
@@ -233,7 +386,9 @@ function normalize(saved) {
 const saved = load('settings.json', {});
 if (saved.brandName === 'Amnan SaaS') delete saved.brandName; // default lama
 if (saved.openingMessage === OPENING_LAMA) delete saved.openingMessage; // teks lama redundan
-let cur = normalize(saved);
+const original = structuredClone(saved);
+const migration = migrateLegacy(saved);
+let cur = normalize(migration.data);
 
 export const get = () => cur;
 
@@ -241,6 +396,22 @@ const readHistory = () => {
   const h = load('settings.history.json', []);
   return Array.isArray(h) ? h : [];
 };
+
+// Simpan hasil migrasi sebagai versi BARU: isi sebelum migrasi (masih memuat intents/slangMap lama) masuk riwayat
+// dengan catatan, jadi tidak ada data yang hilang. Gagal menyimpan (mis. berkas terblokir) -> dipakai di memori saja.
+function persistMigration(notes) {
+  const oldVersion = cur.version;
+  try {
+    const hist = readHistory();
+    hist.push({ version: oldVersion, ts: original.updatedAt || Date.now(), by: original.updatedBy || '', note: `Sebelum migrasi otomatis: ${notes.join('. ')}.`, settings: original });
+    save('settings.history.json', hist.slice(-HISTORY_MAX));
+    cur = { ...cur, version: oldVersion + 1, updatedAt: Date.now(), updatedBy: 'migrasi' };
+    save('settings.json', cur);
+  } catch (e) {
+    console.error(`[settings] migrasi belum tersimpan (dipakai di memori): ${e.message}`);
+  }
+}
+if (migration.notes.length) persistMigration(migration.notes);
 
 function apply(patch, by) {
   const next = { ...cur, ...clean(patch || {}, cur) }; // galat validasi -> tidak ada perubahan
@@ -262,7 +433,7 @@ export function update(patch, { expectedVersion = null, by = '' } = {}) {
   return apply(patch, by);
 }
 
-export const history = () => readHistory().map(({ version, ts, by }) => ({ version, ts, by }));
+export const history = () => readHistory().map(({ version, ts, by, note }) => ({ version, ts, by, ...(note ? { note } : {}) }));
 
 // Terapkan snapshot lama sebagai versi BARU.
 export function restore(version, { by = '' } = {}) {
@@ -286,12 +457,13 @@ function conviaInfo() {
   };
 }
 
-// Salinan aman untuk klien: token Telegram dimasking; status Convia hanya boolean.
+// Salinan aman untuk klien: token Telegram dimasking; status Convia dan kunci AI hanya boolean.
 export function publicView(S) {
   const v = structuredClone(S);
   const t = v.notify?.telegramBotToken;
   if (v.notify) v.notify.telegramBotToken = t ? MASK + String(t).slice(-4) : '';
   v.waProvider = WA_PROVIDERS.includes(v.waProvider) ? v.waProvider : DEFAULTS.waProvider;
+  v.ai.hasKey = hasAiKey(); // hanya boolean: kunci tidak pernah keluar dari server
   v.convia = conviaInfo();
   return v;
 }

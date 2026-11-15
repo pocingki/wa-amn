@@ -1,11 +1,13 @@
-// Pengaturan: bot, serah-terima, ketahanan, retensi, notifikasi + koneksi WhatsApp (QR Baileys atau API resmi Convia).
+// Pengaturan: bot, salam, format nomor, pertanyaan wajib, serah-terima, ketahanan, retensi, notifikasi, koneksi WhatsApp (QR Baileys),
+// serta kartu Balasan AI, Kuota AI, dan Pemakaian AI. Mode API resmi (Convia) disembunyikan dari UI; kode backend tidak berubah.
 import { checkBase, normalizeHex, paletteFrom, DEFAULT_PALETTE } from '../brand-color.js';
 import {
   $, api, send, esc, icon, field, INP, BTN_DARK, BTN_LIGHT, toast, poll, onEvent, confirmDialog, getMe, isAdminRole, waStatusView,
   loadSettings, getSettings, saveSettings, onSettingsChange, openSettingsHistory,
 } from '../lib.js';
 
-let stopPoll = null, off = null, offEv = null, lastQr = null, canEdit = true, root, brandInfo = null, restartPending = false;
+let stopPoll = null, stopUsage = null, off = null, offEv = null, lastQr = null, canEdit = true, root, brandInfo = null;
+let greet = [], keyState = null, keyEdit = false, usageState = { data: null, error: '' };
 
 const VARS = 'Variabel: {nama} {bot} {admin}';
 
@@ -44,23 +46,173 @@ export function buildSettingsPatch(v, cur = {}) {
   n.onDisconnected = v.onDisconnected === 'on';
   num(NOTIFY_RANGE[0], NOTIFY_RANGE[1], NOTIFY_RANGE[2], NOTIFY_RANGE[3], n);
   p.notify = n;
+  // Bagian baru: hanya diproses bila ada di form (pemanggil lama tanpa kunci ini tetap valid).
+  if ('phoneFormat' in v) {
+    const f = String(v.phoneFormat ?? '').trim();
+    if (!PHONE_FORMATS.includes(f)) errors.push({ field: 'phoneFormat', msg: 'Pilih salah satu format nomor telepon.' });
+    else p.phoneFormat = f;
+  }
+  if ('greetingWords' in v) {
+    const g = normalizeGreetings(v.greetingWords);
+    if (!g.length) errors.push({ field: 'g-add', msg: 'Daftar kata salam tidak boleh kosong.' });
+    else p.greetingWords = g;
+  }
+  if ('referensiQuestion' in v) {
+    const q = String(v.referensiQuestion ?? '').replace(/\s+/g, ' ').trim().slice(0, REF_Q_MAX);
+    if (!q) errors.push({ field: 'referensiQuestion', msg: 'Teks pertanyaan referensi wajib diisi.' });
+    else {
+      const old = (Array.isArray(cur.requiredFields) ? cur.requiredFields : []).find((f) => f?.id === 'referensi');
+      p.requiredFields = [{ id: 'referensi', type: 'text', enabled: old?.enabled !== false, question: q }]; // tepat satu butir
+    }
+  }
   return { patch: p, errors };
 }
 
-const WA_PROVIDER_VALUES = ['baileys', 'convia'];
-const WA_OPTIONS = [
-  ['baileys', 'Baileys (scan QR)', 'Tautkan nomor WhatsApp lewat scan QR dari HP. Bawaan.'],
-  ['convia', 'API Resmi (Convia)', 'Terhubung lewat WhatsApp Business API resmi melalui Convia.'],
-];
+// ---- Format nomor, kata salam, pertanyaan referensi (murni, bisa diuji) ----
+const PHONE_FORMATS = ['digits', 'international'];
+const SAMPLE_PHONE = '6281381688802';
+const REF_Q_MAX = 300;
+const REF_Q_DEFAULT = 'Boleh tahu, Kakak mengetahui kami dari mana?';
+// Bawaan sama dengan kontrak aturan bisnis (pemilik: B7). Dipakai tombol "Kembalikan bawaan" dan bila server belum mengirim daftar.
+export const DEFAULT_GREETINGS = ['halo', 'hallo', 'hai', 'hi', 'hello', 'hey', 'permisi', 'assalamualaikum', "assalamu'alaikum", 'salam', 'selamat pagi', 'selamat siang', 'selamat sore', 'selamat malam', 'pagi', 'siang', 'sore', 'malam', 'p'];
+const GREET_MAX = 100;
 
-/** Validasi pilihan koneksi WhatsApp (murni, diuji). changed = beda dengan nilai tersimpan. */
+/** Rapikan satu kata salam: huruf kecil, spasi tunggal, maks 40 karakter dan 3 kata (aturan isGreeting memeriksa 3 kata pertama). */
+export function cleanGreeting(w) {
+  return String(w ?? '').toLowerCase().replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim().split(' ').slice(0, 3).join(' ').slice(0, 40);
+}
+
+/** Daftar kata salam bersih: tanpa kosong/ganda, maks 100 butir. Bukan larik -> []. */
+export function normalizeGreetings(list) {
+  if (!Array.isArray(list)) return [];
+  return [...new Set(list.map(cleanGreeting).filter(Boolean))].slice(0, GREET_MAX);
+}
+
+/** Format nomor untuk TAMPILAN. 'international': 62 -> "+62 813-8168-8802"; kode negara lain -> "+" + angka. */
+export function formatPhone(raw, fmt = 'digits') {
+  const d = String(raw ?? '').replace(/\D/g, '');
+  if (!d || fmt !== 'international') return d;
+  if (d.startsWith('62') && d.length > 2) {
+    const r = d.slice(2);
+    return '+62 ' + [r.slice(0, 3), r.slice(3, 7), r.slice(7)].filter(Boolean).join('-');
+  }
+  return '+' + d;
+}
+
+// ---- Balasan AI: validasi form (murni, bisa diuji) ----
+export const AI_PROVIDERS = [
+  ['anthropic', 'Anthropic (Claude)'], ['openai', 'OpenAI'], ['gemini', 'Google Gemini'], ['openai-compatible', 'OpenAI-compatible (alamat sendiri)'],
+];
+export const AI_DEFAULTS = {
+  enabled: false, provider: 'anthropic', baseUrl: '', model: '', persona: '', rules: '', maxHistory: 10, maxReplyChars: 600, timeoutMs: 20000,
+  monthlyQuota: 1000, perCustomerDailyLimit: 20, quotaExhaustedMessage: 'Terima kasih, pesan Anda kami teruskan ke admin.', errorMessage: '',
+};
+// ASUMSI: batas panjang/angka di bawah adalah pilihan B8 (kontrak tidak menyebut angka); B7 bebas memperketat.
+const AI_LIMITS = { model: 100, baseUrl: 300, persona: 2000, rules: 4000, message: 1000, monthly: [1, 1000000], daily: [1, 10000] };
+
+/** Susun patch { ai: {...} } dari form. maxHistory/maxReplyChars/timeoutMs tidak ada di UI: nilai tersimpan dipertahankan. */
+export function buildAiPatch(v, cur = {}) {
+  const errors = [];
+  const old = { ...AI_DEFAULTS, ...(cur.ai && typeof cur.ai === 'object' ? cur.ai : {}) };
+  const a = { maxHistory: old.maxHistory, maxReplyChars: old.maxReplyChars, timeoutMs: old.timeoutMs };
+  const one = (x, max) => String(x ?? '').replace(/\r\n?/g, '\n').trim().slice(0, max);
+  a.enabled = v.aiEnabled === 'on';
+  const provider = String(v.aiProvider ?? '').trim();
+  if (!AI_PROVIDERS.some(([k]) => k === provider)) errors.push({ field: 'aiProvider', msg: 'Pilih salah satu penyedia AI.' });
+  else a.provider = provider;
+  a.model = String(v.aiModel ?? '').replace(/\s+/g, ' ').trim().slice(0, AI_LIMITS.model);
+  if (a.enabled && !a.model) errors.push({ field: 'aiModel', msg: 'Isi nama model sebelum mengaktifkan balasan AI.' });
+  const base = String(v.aiBaseUrl ?? '').trim().slice(0, AI_LIMITS.baseUrl);
+  let baseOk = '';
+  if (base) {
+    try {
+      const u = new URL(base);
+      if (!['http:', 'https:'].includes(u.protocol) || u.username || u.password) throw new Error('x');
+      baseOk = base;
+    } catch { baseOk = ''; }
+  }
+  if (a.provider === 'openai-compatible' && !baseOk) errors.push({ field: 'aiBaseUrl', msg: 'Alamat dasar wajib diisi untuk OpenAI-compatible, berawalan http:// atau https:// dan tanpa nama pengguna/kata sandi.' });
+  a.baseUrl = baseOk;
+  a.persona = one(v.aiPersona, AI_LIMITS.persona);
+  a.rules = one(v.aiRules, AI_LIMITS.rules);
+  const num = (k, label, [min, max], target) => {
+    const raw = String(v[k] ?? '').trim();
+    const n = Number(raw);
+    if (raw === '' || !Number.isInteger(n) || n < min || n > max) errors.push({ field: k, msg: `${label} harus bilangan bulat ${min}-${max}.` });
+    else a[target] = n;
+  };
+  num('aiMonthlyQuota', 'Batas bulanan', AI_LIMITS.monthly, 'monthlyQuota');
+  num('aiDailyLimit', 'Batas per customer per hari', AI_LIMITS.daily, 'perCustomerDailyLimit');
+  a.quotaExhaustedMessage = one(v.aiQuotaMessage, AI_LIMITS.message);
+  if (!a.quotaExhaustedMessage) errors.push({ field: 'aiQuotaMessage', msg: 'Pesan kuota habis wajib diisi.' });
+  a.errorMessage = one(v.aiErrorMessage, AI_LIMITS.message); // kosong = pakai respons default
+  return { patch: { ai: a }, errors };
+}
+
+/** Validasi kunci API sebelum dikirim (murni). Tidak pernah memuat isi kunci di pesan. */
+export function validateKeyInput(k) {
+  const key = String(k ?? '').trim();
+  if (!key) return { key: '', error: 'Tempel kunci API terlebih dahulu.' };
+  if (/\s/.test(key)) return { key: '', error: 'Kunci API tidak boleh mengandung spasi atau baris baru.' };
+  if (key.length > 500) return { key: '', error: 'Kunci API terlalu panjang.' };
+  return { key, error: '' };
+}
+
+// ---- Pemakaian AI: normalisasi respons GET /api/ai/usage (murni, bisa diuji) ----
+const nz = (n) => (Number.isFinite(Number(n)) && Number(n) > 0 ? Math.floor(Number(n)) : 0);
+export const fmtNum = (n) => (Number.isFinite(Number(n)) && n !== null && n !== '' ? Number(n).toLocaleString('id-ID') : '-');
+
+/** 'YYYY-MM-DD' -> "15 Nov" (tanpa pergeseran zona waktu). */
+export function dayShort(d) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(d ?? ''));
+  return m ? new Date(Date.UTC(+m[1], +m[2] - 1, +m[3])).toLocaleDateString('id-ID', { day: 'numeric', month: 'short', timeZone: 'UTC' }) : '';
+}
+
+/**
+ * Tanggal reset kuota dari month.to. ASUMSI (B3 belum terverifikasi): `to` = akhir periode (epoch ms atau ISO),
+ * jadi reset = to + 1 md; tanggal 'YYYY-MM-DD' dianggap hari terakhir (inklusif) sehingga reset = hari berikutnya.
+ */
+export function resetLabel(to, tz = 'Asia/Jakarta') {
+  let d, zone = tz;
+  if (typeof to === 'number' && Number.isFinite(to)) d = new Date(to + 1);
+  else if (typeof to === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(to)) { const [y, m, dd] = to.split('-').map(Number); d = new Date(Date.UTC(y, m - 1, dd + 1)); zone = 'UTC'; }
+  else if (typeof to === 'string' && !Number.isNaN(Date.parse(to))) d = new Date(Date.parse(to) + 1);
+  else return '';
+  const opt = { day: 'numeric', month: 'long', year: 'numeric' };
+  try { return d.toLocaleDateString('id-ID', { ...opt, timeZone: zone }); } catch { return d.toLocaleDateString('id-ID', { ...opt, timeZone: 'Asia/Jakarta' }); }
+}
+
+/** Ubah respons usage() B3 menjadi data siap tampil. Tahan terhadap field yang hilang. */
+export function usageView(u, tz = 'Asia/Jakarta') {
+  const m = u?.month || {};
+  const used = nz(m.used), reserved = nz(m.reserved), limit = nz(m.limit);
+  const remaining = Number.isFinite(Number(m.remaining)) ? Math.max(0, Math.floor(Number(m.remaining))) : Math.max(0, limit - used - reserved);
+  const pct = limit ? Math.min(100, Math.round((used / limit) * 100)) : 0;
+  const reservedPct = limit ? Math.min(100 - pct, Math.round((reserved / limit) * 100)) : 0;
+  const level = limit && used + reserved >= limit ? 'full' : pct >= 80 ? 'warn' : 'ok';
+  const rows = (Array.isArray(u?.daily) ? u.daily : []).slice(-30).map((r) => ({ date: String(r?.date ?? ''), used: nz(r?.used) }));
+  const max = rows.reduce((a, r) => Math.max(a, r.used), 0);
+  const peak = rows.find((r) => r.used === max && max > 0);
+  const bars = rows.map((r) => ({ ...r, label: dayShort(r.date), h: r.used > 0 ? Math.max(4, Math.round((r.used / max) * 100)) : 0 }));
+  const ti = u?.tokens?.input, to = u?.tokens?.output;
+  const hasTokens = (Number.isFinite(Number(ti)) && ti !== null) || (Number.isFinite(Number(to)) && to !== null);
+  return {
+    used, reserved, limit, remaining, pct, reservedPct, level, today: nz(u?.today?.used),
+    bars, max, peak: peak ? { date: peak.date, label: dayShort(peak.date), used: peak.used } : null, total30: rows.reduce((a, r) => a + r.used, 0),
+    tokens: { has: hasTokens, input: nz(ti), output: nz(to) }, reset: resetLabel(m.to, tz),
+  };
+}
+
+const WA_PROVIDER_VALUES = ['baileys', 'convia'];
+
+/** Validasi pilihan koneksi WhatsApp (murni, diuji). Tidak dipakai UI sejak mode API resmi disembunyikan; backend dan tes tetap memakainya. */
 export function buildWaProviderPatch(value, cur = {}) {
   const v = String(value ?? '').trim();
   if (!WA_PROVIDER_VALUES.includes(v)) return { patch: null, changed: false, errors: [{ field: 'waProvider', msg: 'Pilih salah satu jenis koneksi WhatsApp.' }] };
   return { patch: { waProvider: v }, changed: v !== (cur.waProvider || 'baileys'), errors: [] };
 }
 
-/** Alamat webhook untuk dashboard Convia: PUBLIC_URL (bila ada) + path. Tanpa PUBLIC_URL hanya path (lengkap = false). */
+/** Alamat webhook Convia (tidak ditampilkan di UI; dipertahankan untuk tes). */
 export function webhookAddress(convia) {
   const path = convia?.webhookPath || '/webhooks/convia';
   const base = String(convia?.publicUrl || '').replace(/\/+$/, '');
@@ -75,13 +227,15 @@ export async function mount(el) {
   const [, me, bi] = await Promise.all([loadSettings(), getMe().catch(() => null), api('/api/brand').catch(() => null)]);
   brandInfo = bi;
   canEdit = isAdminRole(me);
+  keyState = null; keyEdit = false; usageState = { data: null, error: '' };
   off = onSettingsChange((s, src) => { if (src !== 'save') render(); });
   render();
   offEv = onEvent('wa:status', () => pollWA());
   stopPoll = poll(pollWA, 3000);
+  stopUsage = poll(loadUsage, 60000); // muat ulang ringan tiap menit (hanya saat tab terlihat)
 }
 
-export function unmount() { stopPoll?.(); off?.(); offEv?.(); stopPoll = off = offEv = null; }
+export function unmount() { stopPoll?.(); stopUsage?.(); off?.(); offEv?.(); stopPoll = stopUsage = off = offEv = null; }
 
 /** Warna utama: pemilih warna + kode hex + pratinjau palet (rumus sama dengan server). */
 function colorField(S, dis) {
@@ -168,8 +322,11 @@ function bindBrand() {
 
 function render() {
   const S = getSettings(), N = S.notify || {};
-  const CV = S.convia || {}, hook = webhookAddress(CV);
+  const A = { ...AI_DEFAULTS, ...(S.ai && typeof S.ai === 'object' ? S.ai : {}) };
   const dis = canEdit ? '' : 'disabled';
+  greet = Array.isArray(S.greetingWords) ? normalizeGreetings(S.greetingWords) : [...DEFAULT_GREETINGS];
+  const phoneFmt = PHONE_FORMATS.includes(S.phoneFormat) ? S.phoneFormat : 'digits';
+  const refQ = (Array.isArray(S.requiredFields) ? S.requiredFields : []).find((f) => f?.id === 'referensi')?.question || REF_Q_DEFAULT;
   const num = (name, label, hint, min, max) => field(label, `<input name="${name}" type="number" min="${min}" max="${max}" step="1" class="${INP}" value="${esc(S[name] ?? N[name] ?? '')}" ${dis}>`, hint);
   root.innerHTML = `<h1 class="sr-only">Pengaturan</h1>
   ${canEdit ? '' : `<div class="attn-banner mb-6" role="note">${icon('info')}<span>Anda masuk sebagai Agen: pengaturan hanya bisa dilihat. Perubahan dan pemutusan WhatsApp khusus Admin.</span></div>`}
@@ -188,14 +345,35 @@ function render() {
           ${field('Nama bot', `<input name="botName" class="${INP}" value="${esc(S.botName)}" ${dis}>`)}
           ${field('Nama admin', `<input name="adminName" class="${INP}" value="${esc(S.adminName)}" ${dis}>`)}
         </div>
-        ${field('Pesan pembuka', `<textarea name="openingMessage" rows="4" class="${INP}" ${dis}>${esc(S.openingMessage)}</textarea>`, 'Dikirim untuk setiap chat pertama dari nomor baru. ' + VARS)}
-        ${num('botDurationMinutes', 'Batas durasi bot aktif (menit)', '0 = tanpa batas. Dihitung sejak chat pertama atau sejak dikembalikan ke bot. Jika habis, pesan berikutnya kembali ke pesan pembuka.', 0, 10080)}
+        ${field('Pesan pembuka', `<textarea name="openingMessage" rows="4" class="${INP}" ${dis}>${esc(S.openingMessage)}</textarea>`, 'Dikirim ke nomor baru pada chat pertamanya, dan ke nomor lama hanya bila pesannya berupa salam. ' + VARS)}
+        ${num('botDurationMinutes', 'Batas durasi bot aktif (menit)', '0 = tanpa batas. Menentukan satu "sesi" untuk pengulangan pertanyaan referensi. Tidak memicu pesan pembuka ulang.', 0, 10080)}
+      </fieldset>
+
+      <fieldset class="space-y-4 border-t border-gray-100 pt-4"><legend class="font-semibold text-brand-800 mb-2">Kata salam</legend>
+        <p class="text-sm text-gray-600">Nomor lama hanya dibalas pesan pembuka bila pesannya diawali salah satu kata ini (3 kata pertama). Pesan yang hanya berisi salam dibalas pembuka saja, tanpa AI. Huruf "p" dihitung salam hanya bila seluruh pesan cuma "p".</p>
+        <div id="g-list" class="flex flex-wrap gap-2">${greetChips(dis)}</div>
+        ${canEdit ? `<div class="flex gap-2 flex-wrap items-center">
+          <input id="g-add" class="${INP} flex-1" style="min-width:8rem" maxlength="40" placeholder="Tambah kata salam" aria-label="Kata salam baru" autocomplete="off">
+          <button type="button" id="g-add-btn" class="${BTN_LIGHT} shrink-0">Tambah</button>
+          <button type="button" id="g-reset" class="${BTN_LIGHT} shrink-0">Kembalikan bawaan</button>
+        </div>` : ''}
+      </fieldset>
+
+      <fieldset class="space-y-4 border-t border-gray-100 pt-4"><legend class="font-semibold text-brand-800 mb-2">Pertanyaan wajib</legend>
+        ${field('Pertanyaan referensi', `<input name="referensiQuestion" class="${INP}" value="${esc(refQ)}" maxlength="${REF_Q_MAX}" ${dis}>`, 'Satu-satunya pertanyaan wajib: dari mana customer mengenal Anda. Ditanyakan bila referensi belum terisi di CRM, maksimal 3 kali per sesi (1 awal + 2 ulang); kata "lewati" menghentikannya. Jawaban disimpan maks 50 karakter.')}
+      </fieldset>
+
+      <fieldset class="space-y-3 border-t border-gray-100 pt-4"><legend class="font-semibold text-brand-800 mb-2">Format nomor telepon</legend>
+        <p class="text-sm text-gray-600">Hanya mengubah tampilan. Nomor tersimpan tetap berupa angka.</p>
+        ${[['digits', 'Angka saja'], ['international', 'Internasional']].map(([val, label]) => `<label class="flex items-start gap-3 border border-gray-200 rounded-lg p-3 text-sm bg-white">
+          <input type="radio" name="phoneFormat" value="${val}" class="mt-1 shrink-0" ${phoneFmt === val ? 'checked' : ''} ${dis}>
+          <span class="min-w-0"><span class="block font-medium text-gray-900">${label}</span><span class="block text-xs text-gray-600">Contoh: <code class="break-all">${esc(formatPhone(SAMPLE_PHONE, val))}</code></span></span></label>`).join('')}
       </fieldset>
 
       <fieldset class="space-y-4 border-t border-gray-100 pt-4"><legend class="font-semibold text-brand-800 mb-2">Serah-terima ke admin &amp; ketahanan</legend>
         ${field('Pesan serah-terima', `<textarea name="handoverMessage" rows="2" class="${INP}" ${dis}>${esc(S.handoverMessage)}</textarea>`, 'Dikirim saat percakapan dialihkan dari bot ke admin. ' + VARS)}
         ${chk('autoTakeoverOnPhoneReply', S.autoTakeoverOnPhoneReply, 'Otomatis ambil alih saat admin membalas dari HP', 'Bila admin membalas langsung lewat aplikasi WhatsApp di HP, bot berhenti membalas percakapan itu.', dis)}
-        ${num('adminAutoReturnMinutes', 'Bot aktif kembali otomatis setelah admin tidak membalas (menit)', '0 = mati (bot tetap diam sampai Anda mengembalikannya manual). Jika diisi, saat pelanggan chat lagi dan admin sudah tidak aktif (tidak membalas atau mengambil alih) lebih lama dari ini, percakapan kembali ke mode bot dan dibalas pesan pembuka.', 0, 10080)}
+        ${num('adminAutoReturnMinutes', 'Bot aktif kembali otomatis setelah admin tidak membalas (menit)', '0 = mati (bot tetap diam sampai Anda mengembalikannya manual). Jika diisi, saat pelanggan chat lagi dan admin sudah tidak aktif (tidak membalas atau mengambil alih) lebih lama dari ini, percakapan kembali ke mode bot.', 0, 10080)}
         ${num('staleMinutes', 'Batas pesan basi (menit)', 'Pesan yang lebih lama dari ini (mis. terkirim saat bot mati) tidak dibalas bot dan ditandai perlu perhatian.', 1, 1440)}
         ${num('fallbackCooldownMinutes', 'Jeda respons default (menit)', 'Respons default tidak dikirim berulang ke nomor yang sama dalam rentang ini. 0 = tanpa jeda.', 0, 1440)}
         ${num('sendRateLimitPerMinute', 'Batas kirim per menit', 'Melindungi nomor WhatsApp dari pemblokiran karena mengirim terlalu cepat.', 1, 600)}
@@ -221,28 +399,7 @@ function render() {
     </form>
 
     <div class="card space-y-4">
-      <div><h2 class="font-bold text-lg text-gray-900">Koneksi WhatsApp</h2><p class="text-sm text-gray-600">Pilih cara server terhubung ke WhatsApp, lalu pantau statusnya</p></div>
-      <form id="wa-form" class="space-y-3" novalidate>
-        <fieldset class="space-y-2"><legend class="sr-only">Jenis koneksi WhatsApp</legend>
-          ${WA_OPTIONS.map(([val, label, hint]) => `<label class="flex items-start gap-3 border border-gray-200 rounded-lg p-3 text-sm bg-white">
-            <input type="radio" name="waProvider" value="${val}" class="mt-1 shrink-0" ${S.waProvider === val || (!S.waProvider && val === 'baileys') ? 'checked' : ''} ${dis}>
-            <span class="min-w-0"><span class="block font-medium text-gray-900">${esc(label)}</span><span class="block text-xs text-gray-600">${esc(hint)}</span></span></label>`).join('')}
-        </fieldset>
-        ${CV.envOverride ? `<p class="text-xs text-amber-800" role="note">Server dijalankan dengan WA_PROVIDER=${esc(CV.envOverride)} di .env, nilai itu mengalahkan pilihan di sini.</p>` : ''}
-        <div id="wa-convia" class="border border-gray-200 rounded-xl p-4 bg-gray-50 space-y-3 text-sm" ${S.waProvider === 'convia' ? '' : 'hidden'}>
-          <p class="font-medium">Konfigurasi Convia di server: <span class="font-bold inline-flex items-center gap-1 ${CV.configured ? 'text-green-800' : 'text-amber-800'}">${icon(CV.configured ? 'ok' : 'info')} ${CV.configured ? 'SUDAH DIISI' : 'BELUM LENGKAP'}</span></p>
-          <div class="min-w-0">
-            <div class="font-medium text-gray-700">Alamat webhook (isi di dashboard Convia)</div>
-            <code id="wa-webhook" class="block mt-1 break-all rounded-lg border border-gray-300 bg-white px-3 py-2 text-xs text-gray-900 select-all">${esc(hook.url)}</code>
-            ${hook.complete ? '' : '<p class="text-xs text-gray-600 mt-1">PUBLIC_URL belum diisi di .env. Awali dengan alamat publik server Anda, mis. https://domain-anda.id.</p>'}
-          </div>
-          <p class="text-xs text-gray-700">API key dan secret webhook tidak diisi di sini. Isi di berkas <strong>.env</strong>: <code class="break-all">CONVIA_API_KEY</code> dan <code class="break-all">CONVIA_WEBHOOK_SECRET</code> (atau <code class="break-all">CONVIA_SIGNING_SECRET</code>), lalu restart server.</p>
-          ${CV.configured ? '' : '<p class="text-xs text-amber-800">Selama belum lengkap, mode Convia tidak berjalan dan tidak kembali ke Baileys secara diam-diam.</p>'}
-        </div>
-        <div id="wa-err" class="form-error" role="alert" hidden></div>
-        ${restartPending ? `<div id="wa-restart" class="attn-banner" role="status">${icon('info')}<span><strong>Restart server diperlukan</strong> agar perubahan koneksi WhatsApp berlaku.</span></div>` : ''}
-        ${canEdit ? `<button class="${BTN_DARK} w-full sm:w-auto">Simpan koneksi</button>` : ''}
-      </form>
+      <div><h2 class="font-bold text-lg text-gray-900">Koneksi WhatsApp</h2><p class="text-sm text-gray-600">Tautkan nomor WhatsApp lewat scan QR (Baileys), lalu pantau statusnya</p></div>
       <div class="border border-gray-200 rounded-xl p-4 bg-gray-50 space-y-2 text-sm" aria-live="polite">
         <p class="font-medium">Status Koneksi Saat Ini: <span id="w-label" class="font-bold inline-flex items-center gap-1 text-red-800">TERPUTUS</span></p>
         <p id="w-number" class="text-gray-700 break-words" hidden></p>
@@ -257,15 +414,20 @@ function render() {
         <li>Buka WhatsApp di HP, masuk ke Perangkat Tertaut.</li><li>Pilih Tautkan Perangkat, lalu scan QR di atas.</li><li>Setelah TERHUBUNG, chat masuk ke nomor tersebut diproses bot.</li>
       </ol>
     </div>
-  </div>`;
+  </div>
+  ${aiSectionHTML(A, dis)}`;
   lastQr = null;
 
   $('#s-history').onclick = openSettingsHistory;
   bindBrand();
+  bindGreetings();
+  bindAi();
+  paintUsage();
   $('#s-form').onsubmit = async (e) => {
     e.preventDefault();
     if (!canEdit) return;
     const v = Object.fromEntries(new FormData(e.target));
+    v.greetingWords = [...greet]; // daftar dikelola di state (bukan kolom form)
     const cur = getSettings();
     const { patch, errors } = buildSettingsPatch(v, cur);
     const box = $('#s-err');
@@ -280,33 +442,6 @@ function render() {
       if (err.conflict) render(); else { box.hidden = false; box.textContent = err.message; }
     } finally { if (btn.isConnected) btn.disabled = false; }
   };
-  const syncProvider = () => {
-    const v = providerChoice();
-    $('#wa-convia').hidden = v !== 'convia';
-    $('#w-steps').hidden = v === 'convia';
-    pollWA();
-  };
-  $('#wa-form').addEventListener('change', syncProvider);
-  $('#wa-form').onsubmit = async (e) => {
-    e.preventDefault();
-    if (!canEdit) return;
-    const cur = getSettings();
-    const { patch, errors, changed } = buildWaProviderPatch(providerChoice(), cur);
-    const box = $('#wa-err');
-    box.hidden = !errors.length;
-    box.innerHTML = errors.map((x) => esc(x.msg)).join('<br>');
-    if (errors.length) return;
-    if (!changed) { toast('Koneksi WhatsApp tidak berubah'); return; }
-    const btn = e.target.querySelector('button:not([type=button])');
-    btn.disabled = true;
-    try {
-      const res = await saveSettings(patch, { message: 'Koneksi WhatsApp tersimpan', undo: false });
-      if (res?.restartRequired) restartPending = true;
-      render();
-    } catch (err) {
-      if (err.conflict) render(); else { box.hidden = false; box.textContent = err.message; }
-    } finally { if (btn.isConnected) btn.disabled = false; }
-  };
   $('#w-logout')?.addEventListener('click', async () => {
     if (!(await confirmDialog('Putuskan WhatsApp?', 'Putuskan nomor WhatsApp ini dan tampilkan QR baru? Bot tidak akan membalas sampai nomor terhubung lagi.', { okText: 'Putuskan', danger: true }))) return;
     try { await send('/api/wa/logout'); pollWA(); } catch (err) { toast(err.message, true); }
@@ -314,9 +449,234 @@ function render() {
   pollWA();
 }
 
-/** Pilihan koneksi yang sedang dipilih di form (belum tentu tersimpan); cadangan: nilai tersimpan. */
-function providerChoice() {
-  return $('#wa-form input[name="waProvider"]:checked')?.value || getSettings().waProvider || 'baileys';
+/** Mode Convia hanya mungkin dari data/.env lama; UI tidak menawarkannya, tetapi tombol QR/logout tetap disembunyikan bila aktif. */
+const isConvia = () => getSettings()?.waProvider === 'convia';
+
+/* ====================================================================
+   Kata salam
+   ==================================================================== */
+function greetChips(dis) {
+  if (!greet.length) return '<p class="text-sm text-amber-800">Belum ada kata salam.</p>';
+  return greet.map((w, i) => `<span class="inline-flex items-center gap-1 rounded-full border border-gray-300 bg-white py-1 text-sm" style="padding-left:.75rem;padding-right:.25rem">${esc(w)}${dis ? '' : `<button type="button" data-g-del="${i}" class="icon-btn" style="min-width:1.75rem;min-height:1.75rem" aria-label="Hapus kata salam ${esc(w)}">${icon('x', 'icon-xs')}</button>`}</span>`).join('');
+}
+
+function bindGreetings() {
+  if (!canEdit) return;
+  const list = $('#g-list'), inp = $('#g-add');
+  const paint = () => { list.innerHTML = greetChips(''); };
+  const add = () => {
+    const w = cleanGreeting(inp.value);
+    if (!w) { inp.value = ''; return; }
+    if (greet.includes(w)) toast('Kata salam itu sudah ada', true);
+    else if (greet.length >= GREET_MAX) toast(`Maksimal ${GREET_MAX} kata salam`, true);
+    else { greet.push(w); paint(); }
+    inp.value = '';
+    inp.focus();
+  };
+  $('#g-add-btn').onclick = add;
+  inp.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); add(); } }; // Enter tidak boleh menyimpan seluruh form
+  list.onclick = (e) => {
+    const b = e.target.closest('[data-g-del]');
+    if (!b) return;
+    greet.splice(Number(b.dataset.gDel), 1);
+    paint();
+  };
+  $('#g-reset').onclick = () => { greet = [...DEFAULT_GREETINGS]; paint(); };
+}
+
+/* ====================================================================
+   Balasan AI, Kuota AI, Pemakaian AI
+   ==================================================================== */
+const KIND_LABEL = {
+  auth: 'Kunci API ditolak', rate_limit: 'Terlalu banyak permintaan', quota_provider: 'Kuota di penyedia habis', timeout: 'Waktu habis',
+  unreachable: 'Penyedia tidak terjangkau', bad_request: 'Permintaan ditolak (cek model/alamat)', server: 'Galat di sisi penyedia', empty: 'Jawaban kosong', no_key: 'Belum ada kunci API',
+};
+
+const hasKey = () => (keyState != null ? keyState : !!(getSettings()?.ai?.hasKey ?? getSettings()?.hasAiKey)); // ASUMSI: server menaruh boolean di ai.hasKey
+
+/** Kotak kunci API: tulis-saja. Nilai kunci tidak pernah dirender; hanya status "tersimpan". */
+function keyBoxHTML() {
+  const has = hasKey();
+  const status = `<p class="text-sm font-medium">Kunci API: <span class="font-bold inline-flex items-center gap-1 ${has ? 'text-green-800' : 'text-amber-800'}">${icon(has ? 'ok' : 'info')} ${has ? 'tersimpan' : 'belum ada'}</span></p>`;
+  if (!canEdit) return status;
+  const input = `<div class="flex gap-2 flex-wrap items-center">
+      <input id="ai-key" type="password" class="${INP} flex-1" style="min-width:8rem" autocomplete="off" spellcheck="false" maxlength="500" placeholder="Tempel kunci API" aria-label="Kunci API baru">
+      <button type="button" id="ai-key-save" class="${BTN_DARK} shrink-0">Simpan kunci</button>
+      ${has ? `<button type="button" id="ai-key-cancel" class="${BTN_LIGHT} shrink-0">Batal</button>` : ''}
+    </div>`;
+  if (!has || keyEdit) return `${status}${input}<p class="text-xs text-gray-600">Kunci disimpan terpisah dari pengaturan dan tidak akan ditampilkan lagi.</p>`;
+  return `${status}<div class="flex gap-2 flex-wrap"><button type="button" id="ai-key-change" class="${BTN_LIGHT}">Ganti</button><button type="button" id="ai-key-del" class="${BTN_LIGHT}">Hapus</button></div>`;
+}
+
+function aiSectionHTML(A, dis) {
+  const num = (name, label, hint, [min, max], val) => field(label, `<input name="${name}" type="number" inputmode="numeric" min="${min}" max="${max}" step="1" class="${INP}" value="${esc(val)}" ${dis}>`, hint);
+  const compat = A.provider === 'openai-compatible';
+  return `<form id="ai-form" class="grid grid-cols-1 lg:grid-cols-2 gap-6 items-start" style="margin-top:1.5rem" novalidate>
+    <div class="space-y-6 min-w-0">
+      <section class="card space-y-4" aria-labelledby="ai-h">
+        <div><h2 id="ai-h" class="font-bold text-lg text-gray-900">Balasan AI</h2><p class="text-sm text-gray-600">Menjawab pertanyaan customer dari basis pengetahuan (diatur di halaman Pesan). Bila nonaktif, bot memakai respons default.</p></div>
+        ${chk('aiEnabled', A.enabled, 'Aktifkan balasan AI', '', dis)}
+        ${field('Penyedia AI', `<select name="aiProvider" id="ai-provider" class="${INP}" ${dis}>${AI_PROVIDERS.map(([k, l]) => `<option value="${k}" ${A.provider === k ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>`)}
+        <div id="ai-base-wrap" ${compat ? '' : 'hidden'}>${field('Alamat dasar (base URL)', `<input name="aiBaseUrl" type="url" class="${INP}" value="${esc(A.baseUrl)}" maxlength="${AI_LIMITS.baseUrl}" placeholder="https://..." autocomplete="off" spellcheck="false" ${dis}>`, 'Wajib untuk OpenAI-compatible. Jangan menaruh kunci API di alamat.')}</div>
+        ${field('Nama model', `<input name="aiModel" class="${INP}" value="${esc(A.model)}" maxlength="${AI_LIMITS.model}" autocomplete="off" spellcheck="false" ${dis}>`, 'Teks bebas. Tulis persis seperti di dokumentasi penyedia.')}
+        <div id="ai-key-box" class="space-y-2 border border-gray-200 rounded-xl p-3 bg-gray-50">${keyBoxHTML()}</div>
+        ${field('Persona', `<textarea name="aiPersona" rows="3" class="${INP}" maxlength="${AI_LIMITS.persona}" ${dis}>${esc(A.persona)}</textarea>`, 'Gaya dan peran bot, mis. ramah dan singkat.')}
+        ${field('Aturan tambahan', `<textarea name="aiRules" rows="4" class="${INP}" maxlength="${AI_LIMITS.rules}" ${dis}>${esc(A.rules)}</textarea>`, 'Aturan keras sudah otomatis: jawab hanya dari basis pengetahuan, tidak mengarang harga/janji/diskon, dan tidak membuka instruksi.')}
+        ${field('Pesan saat kuota habis', `<textarea name="aiQuotaMessage" rows="2" class="${INP}" maxlength="${AI_LIMITS.message}" ${dis}>${esc(A.quotaExhaustedMessage)}</textarea>`)}
+        ${field('Pesan saat AI galat', `<textarea name="aiErrorMessage" rows="2" class="${INP}" maxlength="${AI_LIMITS.message}" ${dis}>${esc(A.errorMessage)}</textarea>`, 'Kosong = memakai respons default.')}
+        <p class="text-xs text-gray-600">Isi pesan customer dan basis pengetahuan dikirim ke penyedia yang dipilih. Nomor telepon dan nama customer tidak dikirim.</p>
+        ${canEdit ? `<div class="space-y-2">
+          <div class="flex gap-2 flex-wrap items-center"><button type="button" id="ai-test" class="${BTN_LIGHT}">Uji koneksi</button><span id="ai-dirty" class="text-xs text-amber-800" hidden>Uji memakai pengaturan yang sudah disimpan. Simpan dulu bila baru mengubahnya.</span></div>
+          <div id="ai-test-result" class="text-sm break-words" role="status" aria-live="polite" hidden></div>
+        </div>` : ''}
+      </section>
+
+      <section class="card space-y-4" aria-labelledby="aiq-h">
+        <div><h2 id="aiq-h" class="font-bold text-lg text-gray-900">Kuota AI</h2><p class="text-sm text-gray-600">1 balasan AI = 1 kuota; gagal tidak dihitung.</p></div>
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          ${num('aiMonthlyQuota', 'Batas bulanan', 'Balasan AI per bulan.', AI_LIMITS.monthly, A.monthlyQuota)}
+          ${num('aiDailyLimit', 'Batas per customer per hari', 'Balasan AI per customer.', AI_LIMITS.daily, A.perCustomerDailyLimit)}
+        </div>
+        <div id="ai-err" class="form-error" role="alert" hidden></div>
+        ${canEdit ? `<button class="${BTN_DARK}">Simpan pengaturan AI</button>` : '<p class="text-xs text-gray-600">Hanya Admin yang dapat mengubah pengaturan AI.</p>'}
+      </section>
+    </div>
+
+    <section class="card space-y-4 min-w-0" aria-labelledby="aiu-h">
+      <div class="flex items-start justify-between gap-3"><div><h2 id="aiu-h" class="font-bold text-lg text-gray-900">Pemakaian AI</h2><p class="text-sm text-gray-600">Bulan ini dan 30 hari terakhir</p></div>
+        <button type="button" id="ai-usage-refresh" class="icon-btn shrink-0" aria-label="Muat ulang pemakaian" title="Muat ulang">${icon('refresh')}</button></div>
+      <div id="ai-usage" class="space-y-4" aria-live="polite"></div>
+    </section>
+  </form>`;
+}
+
+function usageHTML() {
+  const { data, error } = usageState;
+  const note = error ? `<p class="text-sm text-red-800 break-words" role="alert">${esc(error)}</p>` : '';
+  if (!data) return error ? note : '<p class="text-sm text-gray-600">Memuat pemakaian...</p>';
+  const tz = getSettings()?.timezone || 'Asia/Jakarta';
+  const u = usageView(data, tz);
+  const fill = { ok: '', warn: 'background:#b45309', full: 'background:#b91c1c' }[u.level];
+  const levelText = { ok: '', warn: 'Hampir habis', full: 'Kuota habis' }[u.level];
+  const bars = u.bars.length
+    ? `<div role="img" aria-label="Grafik batang pemakaian ${u.bars.length} hari terakhir. Total ${fmtNum(u.total30)} balasan${u.peak ? `, tertinggi ${fmtNum(u.peak.used)} pada ${esc(u.peak.label)}` : ''}." style="display:flex;align-items:flex-end;gap:2px;height:80px;border-bottom:1px solid #d1d5db">
+        ${u.bars.map((b) => `<span title="${esc(b.label)}: ${fmtNum(b.used)} balasan" class="${b.used ? 'bg-brand-600' : 'bg-gray-200'}" style="flex:1 1 0;min-width:0;height:${b.used ? b.h : 2}%;border-radius:2px 2px 0 0"></span>`).join('')}
+      </div>
+      <div class="flex justify-between text-xs text-gray-600"><span>${esc(u.bars[0].label)}</span><span>${u.peak ? `Tertinggi ${fmtNum(u.peak.used)} (${esc(u.peak.label)})` : 'Belum ada pemakaian'}</span><span>${esc(u.bars[u.bars.length - 1].label)}</span></div>`
+    : '<p class="text-sm text-gray-600">Belum ada data harian.</p>';
+  return `${note}
+    <div>
+      <div class="flex justify-between gap-2 flex-wrap" style="align-items:baseline"><p class="text-sm text-gray-700"><span class="text-2xl font-bold text-gray-900">${fmtNum(u.used)}</span> dari ${fmtNum(u.limit)} terpakai</p><p class="text-sm font-medium text-gray-900">Sisa ${fmtNum(u.remaining)}</p></div>
+      <div class="rounded-full bg-gray-200 overflow-hidden mt-2" style="display:flex;height:10px" role="progressbar" aria-label="Kuota bulan ini terpakai" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${u.pct}">
+        <span class="${u.level === 'ok' ? 'bg-brand-600' : ''}" style="width:${u.pct}%;${fill}"></span>
+        <span style="width:${u.reservedPct}%;background:#9ca3af"></span>
+      </div>
+      <p class="text-xs text-gray-600 mt-1">${u.pct}%${u.reserved ? ` &middot; ${fmtNum(u.reserved)} sedang diproses` : ''}${levelText ? ` &middot; <strong>${levelText}</strong>` : ''}${u.reset ? ` &middot; reset ${esc(u.reset)}` : ''}</p>
+    </div>
+    <p class="text-sm text-gray-700">Hari ini: <strong>${fmtNum(u.today)}</strong> balasan AI</p>
+    <div class="space-y-1"><h3 class="text-sm font-semibold text-gray-900">30 hari terakhir</h3>${bars}</div>
+    ${u.tokens.has ? `<p class="text-sm text-gray-700">Token bulan ini: masuk <strong>${fmtNum(u.tokens.input)}</strong> &middot; keluar <strong>${fmtNum(u.tokens.output)}</strong></p>` : ''}`;
+}
+
+function paintUsage() {
+  const box = $('#ai-usage');
+  if (box) box.innerHTML = usageHTML();
+}
+
+async function loadUsage() {
+  try { usageState = { data: await api('/api/ai/usage'), error: '' }; } catch (err) {
+    usageState = { data: usageState.data, error: 'Pemakaian AI belum bisa dimuat' + (err?.message ? ': ' + err.message : '.') };
+  }
+  paintUsage();
+}
+
+function paintKeyBox() {
+  const box = $('#ai-key-box');
+  if (box) box.innerHTML = keyBoxHTML();
+}
+
+function showTest(r) {
+  const el = $('#ai-test-result');
+  if (!el) return;
+  el.hidden = !r;
+  if (!r) return;
+  const kind = !r.ok && r.kind ? KIND_LABEL[r.kind] || '' : '';
+  el.className = 'text-sm break-words ' + (r.ok ? 'text-green-800' : 'text-red-800');
+  el.innerHTML = `<span class="inline-flex items-center gap-1 font-medium">${icon(r.ok ? 'ok' : 'x-circle')} ${r.ok ? 'Koneksi berhasil' : esc(kind || 'Koneksi gagal')}</span>${r.message ? `<span class="block">${esc(r.message)}</span>` : ''}`;
+}
+
+function bindAi() {
+  $('#ai-usage-refresh').onclick = () => loadUsage();
+  const form = $('#ai-form');
+  const sel = $('#ai-provider');
+  sel.onchange = () => { $('#ai-base-wrap').hidden = sel.value !== 'openai-compatible'; };
+  if (!canEdit) return;
+  form.addEventListener('input', (e) => { if (e.target.id !== 'ai-key') $('#ai-dirty').hidden = false; });
+
+  // Kunci API: tombol bertipe button supaya tidak ikut tersimpan lewat form pengaturan; Enter di kolom kunci = simpan kunci.
+  const box = $('#ai-key-box');
+  const saveKey = async () => {
+    const inp = $('#ai-key');
+    const { key, error } = validateKeyInput(inp?.value);
+    if (error) { toast(error, true); inp?.focus(); return; }
+    const btn = $('#ai-key-save');
+    btn.disabled = true;
+    inp.value = ''; // buang dari DOM segera
+    try {
+      const res = await send('/api/ai/key', { key }, 'PUT');
+      keyState = res?.hasKey !== false;
+      keyEdit = false;
+      toast('Kunci API tersimpan');
+    } catch (err) { toast(err.message, true); }
+    paintKeyBox();
+  };
+  box.onkeydown = (e) => { if (e.key === 'Enter' && e.target.id === 'ai-key') { e.preventDefault(); saveKey(); } };
+  box.onclick = async (e) => {
+    const id = e.target.closest('button')?.id;
+    if (id === 'ai-key-save') await saveKey();
+    else if (id === 'ai-key-change') { keyEdit = true; paintKeyBox(); $('#ai-key')?.focus(); }
+    else if (id === 'ai-key-cancel') { keyEdit = false; paintKeyBox(); }
+    else if (id === 'ai-key-del') {
+      if (!(await confirmDialog('Hapus kunci API?', 'Balasan AI berhenti berjalan sampai kunci baru disimpan. Bot memakai respons default.', { okText: 'Hapus', danger: true }))) return;
+      try {
+        const res = await api('/api/ai/key', { method: 'DELETE' });
+        keyState = res?.hasKey === true;
+        keyEdit = false;
+        toast('Kunci API dihapus');
+      } catch (err) { toast(err.message, true); }
+      paintKeyBox();
+    }
+  };
+
+  $('#ai-test').onclick = async (e) => {
+    const btn = e.currentTarget;
+    btn.disabled = true;
+    const out = $('#ai-test-result');
+    out.hidden = false;
+    out.className = 'text-sm text-gray-700';
+    out.textContent = 'Menguji koneksi...';
+    try { showTest(await send('/api/ai/test', {})); } catch (err) { showTest({ ok: false, message: err.message }); }
+    btn.disabled = false;
+  };
+
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const v = Object.fromEntries(new FormData(form)); // kolom kunci tidak bernama, jadi tidak ikut
+    const { patch, errors } = buildAiPatch(v, getSettings());
+    const err = $('#ai-err');
+    err.hidden = !errors.length;
+    err.innerHTML = errors.map((x) => esc(x.msg)).join('<br>');
+    if (errors.length) { form.elements[errors[0].field]?.focus(); return; }
+    const btn = form.querySelector('button:not([type=button])');
+    btn.disabled = true;
+    try {
+      await saveSettings(patch, { message: 'Pengaturan AI tersimpan' });
+      render();
+      loadUsage(); // batas baru langsung terlihat
+    } catch (ex) {
+      if (ex.conflict) render(); else { err.hidden = false; err.textContent = ex.message; }
+    } finally { if (btn.isConnected) btn.disabled = false; }
+  };
 }
 
 async function pollWA() {
@@ -336,5 +696,5 @@ async function pollWA() {
   $('#w-qr').classList.toggle('flex', !!showQr);
   if (showQr && s.qr !== lastQr) { $('#w-img').src = s.qr; lastQr = s.qr; }
   const lo = $('#w-logout');
-  if (lo) lo.hidden = s.status !== 'connected' || providerChoice() !== 'baileys'; // mode Convia tidak punya QR/logout
+  if (lo) lo.hidden = s.status !== 'connected' || isConvia(); // mode Convia tidak punya QR/logout
 }
