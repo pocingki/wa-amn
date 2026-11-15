@@ -485,6 +485,7 @@ export async function handle(req, res, url, ctx) {
         return fail(400, 'Tingkatan Hot Lead harus sudah mencapai tahap Won untuk dikirim ke Acesio');
       }
 
+      if (!String(l.phone || '').replace(/\D/g, '')) return fail(400, 'Nomor telepon customer belum diketahui (hanya ID pengganti/LID). Isi nomor telepon di data customer sebelum dikirim ke Acesio');
       const acesioUrl = String(process.env.ACESIO_URL || 'http://127.0.0.1:3000').trim().replace(/\/+$/, '');
       const acesioKey = String(process.env.ACESIO_BOT_KEY || process.env.ACESIO_API_KEY || process.env.BOT_API_KEY || '').trim();
       if (!acesioKey) return fail(503, 'Integrasi Acesio belum dikonfigurasi: ACESIO_BOT_KEY belum diisi di .env');

@@ -1,11 +1,11 @@
-// Pengaturan: bot, serah-terima, ketahanan, retensi, notifikasi + koneksi WhatsApp (QR).
+// Pengaturan: bot, serah-terima, ketahanan, retensi, notifikasi + koneksi WhatsApp (QR Baileys atau API resmi Convia).
 import { checkBase, normalizeHex, paletteFrom, DEFAULT_PALETTE } from '../brand-color.js';
 import {
   $, api, send, esc, icon, field, INP, BTN_DARK, BTN_LIGHT, toast, poll, onEvent, confirmDialog, getMe, isAdminRole, waStatusView,
   loadSettings, getSettings, saveSettings, onSettingsChange, openSettingsHistory,
 } from '../lib.js';
 
-let stopPoll = null, off = null, offEv = null, lastQr = null, canEdit = true, root, brandInfo = null;
+let stopPoll = null, off = null, offEv = null, lastQr = null, canEdit = true, root, brandInfo = null, restartPending = false;
 
 const VARS = 'Variabel: {nama} {bot} {admin}';
 
@@ -45,6 +45,26 @@ export function buildSettingsPatch(v, cur = {}) {
   num(NOTIFY_RANGE[0], NOTIFY_RANGE[1], NOTIFY_RANGE[2], NOTIFY_RANGE[3], n);
   p.notify = n;
   return { patch: p, errors };
+}
+
+const WA_PROVIDER_VALUES = ['baileys', 'convia'];
+const WA_OPTIONS = [
+  ['baileys', 'Baileys (scan QR)', 'Tautkan nomor WhatsApp lewat scan QR dari HP. Bawaan.'],
+  ['convia', 'API Resmi (Convia)', 'Terhubung lewat WhatsApp Business API resmi melalui Convia.'],
+];
+
+/** Validasi pilihan koneksi WhatsApp (murni, diuji). changed = beda dengan nilai tersimpan. */
+export function buildWaProviderPatch(value, cur = {}) {
+  const v = String(value ?? '').trim();
+  if (!WA_PROVIDER_VALUES.includes(v)) return { patch: null, changed: false, errors: [{ field: 'waProvider', msg: 'Pilih salah satu jenis koneksi WhatsApp.' }] };
+  return { patch: { waProvider: v }, changed: v !== (cur.waProvider || 'baileys'), errors: [] };
+}
+
+/** Alamat webhook untuk dashboard Convia: PUBLIC_URL (bila ada) + path. Tanpa PUBLIC_URL hanya path (lengkap = false). */
+export function webhookAddress(convia) {
+  const path = convia?.webhookPath || '/webhooks/convia';
+  const base = String(convia?.publicUrl || '').replace(/\/+$/, '');
+  return { url: base + path, complete: !!base };
 }
 
 const chk = (name, on, label, hint = '', dis = '') => `<label class="flex items-start gap-2 text-sm font-medium"><input type="checkbox" name="${name}" class="mt-1" ${on ? 'checked' : ''} ${dis}><span>${label}${hint ? `<span class="block text-xs text-gray-600 font-normal">${hint}</span>` : ''}</span></label>`;
@@ -148,6 +168,7 @@ function bindBrand() {
 
 function render() {
   const S = getSettings(), N = S.notify || {};
+  const CV = S.convia || {}, hook = webhookAddress(CV);
   const dis = canEdit ? '' : 'disabled';
   const num = (name, label, hint, min, max) => field(label, `<input name="${name}" type="number" min="${min}" max="${max}" step="1" class="${INP}" value="${esc(S[name] ?? N[name] ?? '')}" ${dis}>`, hint);
   root.innerHTML = `<h1 class="sr-only">Pengaturan</h1>
@@ -200,18 +221,39 @@ function render() {
     </form>
 
     <div class="card space-y-4">
-      <div><h2 class="font-bold text-lg text-gray-900">Koneksi WhatsApp Gateway</h2><p class="text-sm text-gray-600">Kelola status listener dan login QR code nomor WhatsApp</p></div>
+      <div><h2 class="font-bold text-lg text-gray-900">Koneksi WhatsApp</h2><p class="text-sm text-gray-600">Pilih cara server terhubung ke WhatsApp, lalu pantau statusnya</p></div>
+      <form id="wa-form" class="space-y-3" novalidate>
+        <fieldset class="space-y-2"><legend class="sr-only">Jenis koneksi WhatsApp</legend>
+          ${WA_OPTIONS.map(([val, label, hint]) => `<label class="flex items-start gap-3 border border-gray-200 rounded-lg p-3 text-sm bg-white">
+            <input type="radio" name="waProvider" value="${val}" class="mt-1 shrink-0" ${S.waProvider === val || (!S.waProvider && val === 'baileys') ? 'checked' : ''} ${dis}>
+            <span class="min-w-0"><span class="block font-medium text-gray-900">${esc(label)}</span><span class="block text-xs text-gray-600">${esc(hint)}</span></span></label>`).join('')}
+        </fieldset>
+        ${CV.envOverride ? `<p class="text-xs text-amber-800" role="note">Server dijalankan dengan WA_PROVIDER=${esc(CV.envOverride)} di .env, nilai itu mengalahkan pilihan di sini.</p>` : ''}
+        <div id="wa-convia" class="border border-gray-200 rounded-xl p-4 bg-gray-50 space-y-3 text-sm" ${S.waProvider === 'convia' ? '' : 'hidden'}>
+          <p class="font-medium">Konfigurasi Convia di server: <span class="font-bold inline-flex items-center gap-1 ${CV.configured ? 'text-green-800' : 'text-amber-800'}">${icon(CV.configured ? 'ok' : 'info')} ${CV.configured ? 'SUDAH DIISI' : 'BELUM LENGKAP'}</span></p>
+          <div class="min-w-0">
+            <div class="font-medium text-gray-700">Alamat webhook (isi di dashboard Convia)</div>
+            <code id="wa-webhook" class="block mt-1 break-all rounded-lg border border-gray-300 bg-white px-3 py-2 text-xs text-gray-900 select-all">${esc(hook.url)}</code>
+            ${hook.complete ? '' : '<p class="text-xs text-gray-600 mt-1">PUBLIC_URL belum diisi di .env. Awali dengan alamat publik server Anda, mis. https://domain-anda.id.</p>'}
+          </div>
+          <p class="text-xs text-gray-700">API key dan secret webhook tidak diisi di sini. Isi di berkas <strong>.env</strong>: <code class="break-all">CONVIA_API_KEY</code> dan <code class="break-all">CONVIA_WEBHOOK_SECRET</code> (atau <code class="break-all">CONVIA_SIGNING_SECRET</code>), lalu restart server.</p>
+          ${CV.configured ? '' : '<p class="text-xs text-amber-800">Selama belum lengkap, mode Convia tidak berjalan dan tidak kembali ke Baileys secara diam-diam.</p>'}
+        </div>
+        <div id="wa-err" class="form-error" role="alert" hidden></div>
+        ${restartPending ? `<div id="wa-restart" class="attn-banner" role="status">${icon('info')}<span><strong>Restart server diperlukan</strong> agar perubahan koneksi WhatsApp berlaku.</span></div>` : ''}
+        ${canEdit ? `<button class="${BTN_DARK} w-full sm:w-auto">Simpan koneksi</button>` : ''}
+      </form>
       <div class="border border-gray-200 rounded-xl p-4 bg-gray-50 space-y-2 text-sm" aria-live="polite">
         <p class="font-medium">Status Koneksi Saat Ini: <span id="w-label" class="font-bold inline-flex items-center gap-1 text-red-800">TERPUTUS</span></p>
-        <p id="w-number" class="text-gray-700" hidden></p>
-        <p id="w-error" class="text-red-800" hidden></p>
+        <p id="w-number" class="text-gray-700 break-words" hidden></p>
+        <p id="w-error" class="text-red-800 break-words" hidden></p>
       </div>
       <div id="w-qr" class="flex-col items-center gap-3 border border-dashed border-gray-300 rounded-xl p-6" hidden>
-        <img id="w-img" alt="QR code login WhatsApp" class="w-64 h-64">
+        <img id="w-img" alt="QR code login WhatsApp" class="w-64 max-w-full h-auto aspect-square">
         <p class="text-sm text-gray-600 text-center">Scan QR ini dari WhatsApp di HP. QR diperbarui otomatis.</p>
       </div>
       ${canEdit ? '<button type="button" id="w-logout" class="text-sm font-medium px-4 py-2 rounded-lg border border-red-300 text-red-800 hover:bg-red-50" hidden>Putuskan &amp; ganti nomor</button>' : ''}
-      <ol class="list-decimal list-inside space-y-1 text-sm text-gray-700">
+      <ol id="w-steps" class="list-decimal list-inside space-y-1 text-sm text-gray-700" ${S.waProvider === 'convia' ? 'hidden' : ''}>
         <li>Buka WhatsApp di HP, masuk ke Perangkat Tertaut.</li><li>Pilih Tautkan Perangkat, lalu scan QR di atas.</li><li>Setelah TERHUBUNG, chat masuk ke nomor tersebut diproses bot.</li>
       </ol>
     </div>
@@ -238,6 +280,33 @@ function render() {
       if (err.conflict) render(); else { box.hidden = false; box.textContent = err.message; }
     } finally { if (btn.isConnected) btn.disabled = false; }
   };
+  const syncProvider = () => {
+    const v = providerChoice();
+    $('#wa-convia').hidden = v !== 'convia';
+    $('#w-steps').hidden = v === 'convia';
+    pollWA();
+  };
+  $('#wa-form').addEventListener('change', syncProvider);
+  $('#wa-form').onsubmit = async (e) => {
+    e.preventDefault();
+    if (!canEdit) return;
+    const cur = getSettings();
+    const { patch, errors, changed } = buildWaProviderPatch(providerChoice(), cur);
+    const box = $('#wa-err');
+    box.hidden = !errors.length;
+    box.innerHTML = errors.map((x) => esc(x.msg)).join('<br>');
+    if (errors.length) return;
+    if (!changed) { toast('Koneksi WhatsApp tidak berubah'); return; }
+    const btn = e.target.querySelector('button:not([type=button])');
+    btn.disabled = true;
+    try {
+      const res = await saveSettings(patch, { message: 'Koneksi WhatsApp tersimpan', undo: false });
+      if (res?.restartRequired) restartPending = true;
+      render();
+    } catch (err) {
+      if (err.conflict) render(); else { box.hidden = false; box.textContent = err.message; }
+    } finally { if (btn.isConnected) btn.disabled = false; }
+  };
   $('#w-logout')?.addEventListener('click', async () => {
     if (!(await confirmDialog('Putuskan WhatsApp?', 'Putuskan nomor WhatsApp ini dan tampilkan QR baru? Bot tidak akan membalas sampai nomor terhubung lagi.', { okText: 'Putuskan', danger: true }))) return;
     try { await send('/api/wa/logout'); pollWA(); } catch (err) { toast(err.message, true); }
@@ -245,11 +314,17 @@ function render() {
   pollWA();
 }
 
+/** Pilihan koneksi yang sedang dipilih di form (belum tentu tersimpan); cadangan: nilai tersimpan. */
+function providerChoice() {
+  return $('#wa-form input[name="waProvider"]:checked')?.value || getSettings().waProvider || 'baileys';
+}
+
 async function pollWA() {
   let s;
   try { s = await api('/api/wa/status'); } catch { return; }
   if (!$('#w-label')) return;
-  const b = waStatusView(s.status);
+  // 'misconfigured' (Convia tanpa key/secret) belum ada di waStatusView: tampilkan jelas, bukan "tidak tersedia".
+  const b = s.status === 'misconfigured' ? { icon: 'x-circle', label: 'KONFIGURASI BELUM LENGKAP', tone: 'text-red-800' } : waStatusView(s.status);
   $('#w-label').innerHTML = `${icon(b.icon)} ${b.label}`;
   $('#w-label').className = 'font-bold inline-flex items-center gap-1 ' + b.tone;
   $('#w-number').hidden = !s.number;
@@ -261,5 +336,5 @@ async function pollWA() {
   $('#w-qr').classList.toggle('flex', !!showQr);
   if (showQr && s.qr !== lastQr) { $('#w-img').src = s.qr; lastQr = s.qr; }
   const lo = $('#w-logout');
-  if (lo) lo.hidden = s.status !== 'connected';
+  if (lo) lo.hidden = s.status !== 'connected' || providerChoice() !== 'baileys'; // mode Convia tidak punya QR/logout
 }

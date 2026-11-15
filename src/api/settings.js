@@ -29,10 +29,13 @@ export async function handle(req, res, url, ctx) {
       return true;
     }
     try {
+      const before = settings.get().waProvider;
       const next = settings.update(body, { expectedVersion: ifMatch(req), by: ctx.user?.name });
       // audit: hanya nama kunci, tanpa nilai (token/webhook rahasia)
       ctx.audit('settings.update', { fields: Object.keys(body).filter((k) => k in settings.DEFAULTS && !META.has(k)), version: next.version });
-      ctx.sendJSON(res, 200, settings.publicView(next));
+      const view = settings.publicView(next);
+      if (next.waProvider !== before) view.restartRequired = true; // penyedia WA baru dipakai setelah restart
+      ctx.sendJSON(res, 200, view);
     } catch (e) {
       if (e.code === 'CONFLICT') ctx.sendJSON(res, 409, { error: 'Pengaturan diubah orang lain, muat ulang.', current: settings.publicView(e.current) });
       else if (e.code === 'VALIDATION') ctx.sendJSON(res, 400, { error: e.message });
@@ -51,9 +54,12 @@ export async function handle(req, res, url, ctx) {
     if (!ctx.requireRole('admin')) return true;
     const body = await ctx.readBody(req);
     try {
+      const before = settings.get().waProvider;
       const next = settings.restore(isObj(body) ? body.version : null, { by: ctx.user?.name });
       ctx.audit('settings.restore', { from: Number(body.version), version: next.version });
-      ctx.sendJSON(res, 200, settings.publicView(next));
+      const view = settings.publicView(next);
+      if (next.waProvider !== before) view.restartRequired = true;
+      ctx.sendJSON(res, 200, view);
     } catch (e) {
       if (e.code === 'NOT_FOUND') ctx.sendJSON(res, 404, { error: e.message });
       else if (e.code === 'VALIDATION') ctx.sendJSON(res, 400, { error: e.message });
