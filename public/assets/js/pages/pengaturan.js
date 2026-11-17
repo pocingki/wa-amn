@@ -7,9 +7,8 @@ import {
 } from '../lib.js';
 
 let stopPoll = null, stopUsage = null, off = null, offEv = null, lastQr = null, canEdit = true, root, brandInfo = null;
-let greet = [], keyState = null, keyEdit = false, usageState = { data: null, error: '' };
+let keyState = null, keyEdit = false, usageState = { data: null, error: '' };
 
-const VARS = 'Variabel: {nama} {bot} {admin}';
 
 const RANGES = [
   ['botDurationMinutes', 'Batas durasi bot aktif', 0, 10080], ['adminAutoReturnMinutes', 'Bot aktif kembali otomatis', 0, 10080], ['staleMinutes', 'Batas pesan basi', 1, 1440],
@@ -29,7 +28,7 @@ export function buildSettingsPatch(v, cur = {}) {
     if (bad) errors.push({ field: 'brandColor', msg: bad });
     else p.brandColor = c ? normalizeHex(c) : '';
   }
-  for (const k of ['openingMessage', 'handoverMessage']) txt(k, 2000);
+  for (const k of ['openingMessage', 'handoverMessage']) if (k in v) txt(k, 2000); // dikelola di halaman Pesan
   p.botEnabled = v.botEnabled === 'on';
   p.autoTakeoverOnPhoneReply = v.autoTakeoverOnPhoneReply === 'on';
   const num = (k, label, min, max, target = p) => {
@@ -72,7 +71,6 @@ export function buildSettingsPatch(v, cur = {}) {
 const PHONE_FORMATS = ['digits', 'international'];
 const SAMPLE_PHONE = '6281381688802';
 const REF_Q_MAX = 300;
-const REF_Q_DEFAULT = 'Boleh tahu, Kakak mengetahui kami dari mana?';
 // Bawaan sama dengan kontrak aturan bisnis (pemilik: B7). Dipakai tombol "Kembalikan bawaan" dan bila server belum mengirim daftar.
 export const DEFAULT_GREETINGS = ['halo', 'hallo', 'hai', 'hi', 'hello', 'hey', 'permisi', 'assalamualaikum', "assalamu'alaikum", 'salam', 'selamat pagi', 'selamat siang', 'selamat sore', 'selamat malam', 'pagi', 'siang', 'sore', 'malam', 'p'];
 const GREET_MAX = 100;
@@ -324,9 +322,7 @@ function render() {
   const S = getSettings(), N = S.notify || {};
   const A = { ...AI_DEFAULTS, ...(S.ai && typeof S.ai === 'object' ? S.ai : {}) };
   const dis = canEdit ? '' : 'disabled';
-  greet = Array.isArray(S.greetingWords) ? normalizeGreetings(S.greetingWords) : [...DEFAULT_GREETINGS];
   const phoneFmt = PHONE_FORMATS.includes(S.phoneFormat) ? S.phoneFormat : 'digits';
-  const refQ = (Array.isArray(S.requiredFields) ? S.requiredFields : []).find((f) => f?.id === 'referensi')?.question || REF_Q_DEFAULT;
   const num = (name, label, hint, min, max) => field(label, `<input name="${name}" type="number" min="${min}" max="${max}" step="1" class="${INP}" value="${esc(S[name] ?? N[name] ?? '')}" ${dis}>`, hint);
   root.innerHTML = `<h1 class="sr-only">Pengaturan</h1>
   ${canEdit ? '' : `<div class="attn-banner mb-6" role="note">${icon('info')}<span>Anda masuk sebagai Agen: pengaturan hanya bisa dilihat. Perubahan dan pemutusan WhatsApp khusus Admin.</span></div>`}
@@ -345,23 +341,10 @@ function render() {
           ${field('Nama bot', `<input name="botName" class="${INP}" value="${esc(S.botName)}" ${dis}>`)}
           ${field('Nama admin', `<input name="adminName" class="${INP}" value="${esc(S.adminName)}" ${dis}>`)}
         </div>
-        ${field('Pesan pembuka', `<textarea name="openingMessage" rows="4" class="${INP}" ${dis}>${esc(S.openingMessage)}</textarea>`, 'Dikirim ke nomor baru pada chat pertamanya, dan ke nomor lama hanya bila pesannya berupa salam. ' + VARS)}
         ${num('botDurationMinutes', 'Batas durasi bot aktif (menit)', '0 = tanpa batas. Menentukan satu "sesi" untuk pengulangan pertanyaan referensi. Tidak memicu pesan pembuka ulang.', 0, 10080)}
       </fieldset>
 
-      <fieldset class="space-y-4 border-t border-gray-100 pt-4"><legend class="font-semibold text-brand-800 mb-2">Kata salam</legend>
-        <p class="text-sm text-gray-600">Nomor lama hanya dibalas pesan pembuka bila pesannya diawali salah satu kata ini (3 kata pertama). Pesan yang hanya berisi salam dibalas pembuka saja, tanpa AI. Huruf "p" dihitung salam hanya bila seluruh pesan cuma "p".</p>
-        <div id="g-list" class="flex flex-wrap gap-2">${greetChips(dis)}</div>
-        ${canEdit ? `<div class="flex gap-2 flex-wrap items-center">
-          <input id="g-add" class="${INP} flex-1" style="min-width:8rem" maxlength="40" placeholder="Tambah kata salam" aria-label="Kata salam baru" autocomplete="off">
-          <button type="button" id="g-add-btn" class="${BTN_LIGHT} shrink-0">Tambah</button>
-          <button type="button" id="g-reset" class="${BTN_LIGHT} shrink-0">Kembalikan bawaan</button>
-        </div>` : ''}
-      </fieldset>
-
-      <fieldset class="space-y-4 border-t border-gray-100 pt-4"><legend class="font-semibold text-brand-800 mb-2">Pertanyaan wajib</legend>
-        ${field('Pertanyaan referensi', `<input name="referensiQuestion" class="${INP}" value="${esc(refQ)}" maxlength="${REF_Q_MAX}" ${dis}>`, 'Satu-satunya pertanyaan wajib: dari mana customer mengenal Anda. Ditanyakan bila referensi belum terisi di CRM, maksimal 3 kali per sesi (1 awal + 2 ulang); kata "lewati" menghentikannya. Jawaban disimpan maks 50 karakter.')}
-      </fieldset>
+      <p class="text-sm text-gray-600 border-t border-gray-100 pt-4">Pesan pembuka, kata salam, pertanyaan referensi, pesan serah-terima, dan respons default ada di halaman <a href="#/pesan" class="underline font-medium">Pesan</a>.</p>
 
       <fieldset class="space-y-3 border-t border-gray-100 pt-4"><legend class="font-semibold text-brand-800 mb-2">Format nomor telepon</legend>
         <p class="text-sm text-gray-600">Hanya mengubah tampilan. Nomor tersimpan tetap berupa angka.</p>
@@ -370,8 +353,7 @@ function render() {
           <span class="min-w-0"><span class="block font-medium text-gray-900">${label}</span><span class="block text-xs text-gray-600">Contoh: <code class="break-all">${esc(formatPhone(SAMPLE_PHONE, val))}</code></span></span></label>`).join('')}
       </fieldset>
 
-      <fieldset class="space-y-4 border-t border-gray-100 pt-4"><legend class="font-semibold text-brand-800 mb-2">Serah-terima ke admin &amp; ketahanan</legend>
-        ${field('Pesan serah-terima', `<textarea name="handoverMessage" rows="2" class="${INP}" ${dis}>${esc(S.handoverMessage)}</textarea>`, 'Dikirim saat percakapan dialihkan dari bot ke admin. ' + VARS)}
+      <fieldset class="space-y-4 border-t border-gray-100 pt-4"><legend class="font-semibold text-brand-800 mb-2">Serah-terima &amp; ketahanan</legend>
         ${chk('autoTakeoverOnPhoneReply', S.autoTakeoverOnPhoneReply, 'Otomatis ambil alih saat admin membalas dari HP', 'Bila admin membalas langsung lewat aplikasi WhatsApp di HP, bot berhenti membalas percakapan itu.', dis)}
         ${num('adminAutoReturnMinutes', 'Bot aktif kembali otomatis setelah admin tidak membalas (menit)', '0 = mati (bot tetap diam sampai Anda mengembalikannya manual). Jika diisi, saat pelanggan chat lagi dan admin sudah tidak aktif (tidak membalas atau mengambil alih) lebih lama dari ini, percakapan kembali ke mode bot.', 0, 10080)}
         ${num('staleMinutes', 'Batas pesan basi (menit)', 'Pesan yang lebih lama dari ini (mis. terkirim saat bot mati) tidak dibalas bot dan ditandai perlu perhatian.', 1, 1440)}
@@ -420,14 +402,12 @@ function render() {
 
   $('#s-history').onclick = openSettingsHistory;
   bindBrand();
-  bindGreetings();
   bindAi();
   paintUsage();
   $('#s-form').onsubmit = async (e) => {
     e.preventDefault();
     if (!canEdit) return;
     const v = Object.fromEntries(new FormData(e.target));
-    v.greetingWords = [...greet]; // daftar dikelola di state (bukan kolom form)
     const cur = getSettings();
     const { patch, errors } = buildSettingsPatch(v, cur);
     const box = $('#s-err');
@@ -451,38 +431,6 @@ function render() {
 
 /** Mode Convia hanya mungkin dari data/.env lama; UI tidak menawarkannya, tetapi tombol QR/logout tetap disembunyikan bila aktif. */
 const isConvia = () => getSettings()?.waProvider === 'convia';
-
-/* ====================================================================
-   Kata salam
-   ==================================================================== */
-function greetChips(dis) {
-  if (!greet.length) return '<p class="text-sm text-amber-800">Belum ada kata salam.</p>';
-  return greet.map((w, i) => `<span class="inline-flex items-center gap-1 rounded-full border border-gray-300 bg-white py-1 text-sm" style="padding-left:.75rem;padding-right:.25rem">${esc(w)}${dis ? '' : `<button type="button" data-g-del="${i}" class="icon-btn" style="min-width:1.75rem;min-height:1.75rem" aria-label="Hapus kata salam ${esc(w)}">${icon('x', 'icon-xs')}</button>`}</span>`).join('');
-}
-
-function bindGreetings() {
-  if (!canEdit) return;
-  const list = $('#g-list'), inp = $('#g-add');
-  const paint = () => { list.innerHTML = greetChips(''); };
-  const add = () => {
-    const w = cleanGreeting(inp.value);
-    if (!w) { inp.value = ''; return; }
-    if (greet.includes(w)) toast('Kata salam itu sudah ada', true);
-    else if (greet.length >= GREET_MAX) toast(`Maksimal ${GREET_MAX} kata salam`, true);
-    else { greet.push(w); paint(); }
-    inp.value = '';
-    inp.focus();
-  };
-  $('#g-add-btn').onclick = add;
-  inp.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); add(); } }; // Enter tidak boleh menyimpan seluruh form
-  list.onclick = (e) => {
-    const b = e.target.closest('[data-g-del]');
-    if (!b) return;
-    greet.splice(Number(b.dataset.gDel), 1);
-    paint();
-  };
-  $('#g-reset').onclick = () => { greet = [...DEFAULT_GREETINGS]; paint(); };
-}
 
 /* ====================================================================
    Balasan AI, Kuota AI, Pemakaian AI

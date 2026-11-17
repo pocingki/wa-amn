@@ -1,12 +1,14 @@
-// Pesan: pesan pembuka + aturan, Basis Pengetahuan AI (daftar, impor/ekspor Markdown), pertanyaan referensi CRM, penutup, fallback.
+// Pesan: SATU tempat untuk semua pesan bot (pembuka, kata salam, referensi, penutup, serah-terima, respons default) + Basis Pengetahuan AI.
 import {
   $, esc, field, icon, INP, BTN_DARK, BTN_LIGHT, modal, toast, debounce, confirmDialog, getMe, isAdminRole,
   loadSettings, getSettings, saveSettings, onSettingsChange, openSettingsHistory, fmtNum,
   KNOWLEDGE_LIMITS, knowledgeStats, knowledgeLimitError, validateKnowledgeEntry, filterKnowledge,
   knowledgeFromText, previewKnowledgeImport, knowledgeToMarkdown, newKnowledgeId,
 } from '../lib.js';
+import { cleanGreeting, normalizeGreetings, DEFAULT_GREETINGS } from './pengaturan.js';
 
-let S, root, canEdit = true, off = null, query = '';
+let S, root, canEdit = true, off = null, query = '', greet = [];
+const GREET_MAX = 100;
 const VARS = 'Variabel: {nama} {bot} {admin}';
 const MAX_FILE = 2 * 1024 * 1024;
 const STATE_LABEL = { baru: ['Baru', 'tag-ok', 'plus'], duplikat: ['Duplikat', 'tag-info', 'info'], error: ['Error', 'tag-warn', 'alert'] };
@@ -17,7 +19,8 @@ export async function mount(el) {
   const [, me] = await Promise.all([loadSettings(), getMe().catch(() => null)]);
   S = getSettings();
   canEdit = isAdminRole(me);
-  off = onSettingsChange((s, src) => { if (src !== 'save') { S = s; render(); } });
+  greet = Array.isArray(S.greetingWords) ? normalizeGreetings(S.greetingWords) : [...DEFAULT_GREETINGS];
+  off = onSettingsChange((s, src) => { if (src !== 'save') { S = s; greet = Array.isArray(S.greetingWords) ? normalizeGreetings(S.greetingWords) : [...DEFAULT_GREETINGS]; render(); } });
   render();
 }
 export function unmount() { off?.(); off = null; }
@@ -28,6 +31,7 @@ async function commit(patchOrFn, opt) {
     if (!e.conflict) toast(e.message, true);
   }
   S = getSettings();
+  greet = Array.isArray(S.greetingWords) ? normalizeGreetings(S.greetingWords) : [...DEFAULT_GREETINGS];
   render();
 }
 
@@ -76,6 +80,35 @@ function listHTML() {
     <td class="p-3 whitespace-nowrap text-right" data-label="Aksi">${canEdit ? `<button type="button" data-kedit="${esc(e.id)}" class="link-btn mr-2" aria-label="Edit entri ${esc(e.title)}">Edit</button><button type="button" data-kdel="${esc(e.id)}" class="link-btn danger" aria-label="Hapus entri ${esc(e.title)}">Hapus</button>` : '-'}</td></tr>`).join('');
 }
 
+function greetChips(dis) {
+  if (!greet.length) return '<p class="text-sm text-amber-800">Belum ada kata salam.</p>';
+  return greet.map((w, i) => `<span class="inline-flex items-center gap-1 rounded-full border border-gray-300 bg-white py-1 text-sm" style="padding-left:.75rem;padding-right:.25rem">${esc(w)}${dis ? '' : `<button type="button" data-g-del="${i}" class="icon-btn" style="min-width:1.75rem;min-height:1.75rem" aria-label="Hapus kata salam ${esc(w)}">${icon('x', 'icon-xs')}</button>`}</span>`).join('');
+}
+
+function bindGreetings() {
+  if (!canEdit) return;
+  const list = $('#g-list'), inp = $('#g-add');
+  const paint = () => { list.innerHTML = greetChips(''); };
+  const add = () => {
+    const w = cleanGreeting(inp.value);
+    if (!w) { inp.value = ''; return; }
+    if (greet.includes(w)) toast('Kata salam itu sudah ada', true);
+    else if (greet.length >= GREET_MAX) toast(`Maksimal ${GREET_MAX} kata salam`, true);
+    else { greet.push(w); paint(); }
+    inp.value = '';
+    inp.focus();
+  };
+  $('#g-add-btn').onclick = add;
+  inp.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); add(); } };
+  list.onclick = (e) => {
+    const b = e.target.closest('[data-g-del]');
+    if (!b) return;
+    greet.splice(Number(b.dataset.gDel), 1);
+    paint();
+  };
+  $('#g-reset').onclick = () => { greet = [...DEFAULT_GREETINGS]; paint(); };
+}
+
 function paintKnowledge() {
   const body = $('#k-rows'), st = $('#k-stats');
   if (body) body.innerHTML = listHTML();
@@ -88,29 +121,43 @@ function render() {
   const dis = canEdit ? '' : 'disabled';
   const ref = referensiField(S.requiredFields);
   const full = knowledgeOf(S).length >= KNOWLEDGE_LIMITS.entries;
-  const greet = Array.isArray(S.greetingWords) && S.greetingWords.length
-    ? `<p class="text-xs text-gray-600">Kata salam yang dikenali: ${esc(S.greetingWords.join(', '))}.</p>` : '';
   root.innerHTML = `<h1 class="sr-only">Pesan</h1><div class="space-y-8">
   ${canEdit ? '' : `<div class="attn-banner" role="note">${icon('info')}<span>Anda masuk sebagai Agen. Halaman ini hanya bisa dilihat; hanya Admin yang dapat mengubah pengaturan.</span></div>`}
 
-  <section class="card space-y-4" aria-labelledby="h-open">
-    <div><h2 id="h-open" class="text-xl font-bold">Pesan Pembuka</h2><p class="text-sm text-gray-600">Sapaan pertama bot kepada pelanggan.</p></div>
-    <div class="text-sm text-gray-700 space-y-1" id="open-rules">
-      <p class="font-medium">Kapan pesan pembuka dikirim</p>
-      <ul class="list-disc pl-5 space-y-1">
-        <li><b>Nomor baru</b> (belum ada data lead dan belum pernah mengirim pesan): pembuka selalu dikirim.</li>
-        <li><b>Nomor lama</b>: pembuka hanya dikirim bila pesan berisi salam, misalnya "halo" atau "selamat pagi" (di 3 kata pertama). Kata "p" dihitung hanya bila seluruh pesan.</li>
-        <li>Pesan yang <b>hanya salam</b> dibalas pembuka saja, tanpa AI.</li>
-        <li>Bila salam disertai pertanyaan, urutan balasan: pembuka, jawaban AI, lalu pertanyaan referensi.</li>
-        <li>Pembuka dan pertanyaan referensi tidak memakai kuota AI.</li>
-        <li>Lama sesi bot di Pengaturan hanya menentukan "sesi" untuk pengulangan pertanyaan referensi; tidak lagi memicu pembuka ulang.</li>
-      </ul>
-      ${greet}
-    </div>
-    <form id="op-form" class="space-y-2">
-      ${field('Pesan pembuka', `<textarea name="openingMessage" rows="3" maxlength="2000" class="${INP}" ${dis}>${esc(S.openingMessage)}</textarea>`, VARS)}
-      ${canEdit ? `<button class="${BTN_LIGHT}">Simpan pesan pembuka</button>` : ''}
+  <section class="card space-y-5" aria-labelledby="h-msg">
+    <div><h2 id="h-msg" class="text-xl font-bold">Pesan Otomatis Bot</h2><p class="text-sm text-gray-600">Semua pesan yang dikirim bot diatur di sini, satu tombol simpan.</p></div>
+    <form id="msg-form" class="space-y-4" novalidate>
+      ${field('1. Pesan pembuka', `<textarea name="openingMessage" rows="3" maxlength="2000" class="${INP}" ${dis}>${esc(S.openingMessage)}</textarea>`, 'Sapaan pertama. Dikirim ke nomor baru, dan ke nomor lama bila pesannya berisi salam. ' + VARS)}
+      <div class="space-y-2">
+        <p class="text-sm font-medium">Kata salam <span class="font-normal text-gray-600">(pemicu pesan pembuka untuk nomor lama)</span></p>
+        <div id="g-list" class="flex flex-wrap gap-2">${greetChips(dis)}</div>
+        ${canEdit ? `<div class="flex gap-2 flex-wrap items-center">
+          <input id="g-add" class="${INP} flex-1" style="min-width:8rem" maxlength="40" placeholder="Tambah kata salam" aria-label="Kata salam baru" autocomplete="off">
+          <button type="button" id="g-add-btn" class="${BTN_LIGHT} shrink-0">Tambah</button>
+          <button type="button" id="g-reset" class="${BTN_LIGHT} shrink-0">Kembalikan bawaan</button>
+        </div>` : ''}
+      </div>
+      <div class="space-y-2 border-t border-gray-100 pt-4">
+        <label class="flex items-center gap-2 text-sm font-medium"><input type="checkbox" name="refEnabled" ${ref.enabled ? 'checked' : ''} ${dis}> 2. Tanya dari mana pelanggan mengenal Anda (referensi CRM)</label>
+        ${field('Pertanyaan referensi', `<textarea name="refQuestion" rows="2" maxlength="500" class="${INP}" ${dis}>${esc(ref.question)}</textarea>`, 'Jawaban disimpan sebagai referensi lead (maks. 50 karakter). ' + VARS)}
+      </div>
+      <div class="border-t border-gray-100 pt-4 space-y-4">
+        ${field('3. Pesan setelah semua data terkumpul', `<textarea name="completionMessage" rows="2" maxlength="2000" class="${INP}" ${dis}>${esc(S.completionMessage)}</textarea>`, VARS)}
+        ${field('4. Pesan serah-terima ke admin', `<textarea name="handoverMessage" rows="2" maxlength="2000" class="${INP}" ${dis}>${esc(S.handoverMessage)}</textarea>`, 'Dikirim saat percakapan dialihkan dari bot ke admin. ' + VARS)}
+        ${field('5. Respons default (bila AI nonaktif atau belum diatur)', `<textarea name="fallbackMessage" rows="2" maxlength="2000" class="${INP}" ${dis}>${esc(S.fallbackMessage)}</textarea>`, 'Kosongkan agar bot diam.')}
+      </div>
+      <div id="msg-err" class="form-error" role="alert" hidden></div>
+      ${canEdit ? `<button class="${BTN_DARK}">Simpan semua pesan</button>` : ''}
     </form>
+    <details class="text-sm text-gray-700 border-t border-gray-100 pt-3">
+      <summary class="cursor-pointer font-medium">Aturan singkat: kapan bot mengirim apa</summary>
+      <ul class="list-disc pl-5 space-y-1 mt-2">
+        <li>Nomor baru: pembuka selalu dikirim. Nomor lama: pembuka hanya bila pesan diawali kata salam (3 kata pertama; "p" hanya bila seluruh pesan).</li>
+        <li>Pesan yang hanya salam dibalas pembuka saja. Bila disertai pertanyaan: pembuka, jawaban AI, lalu pertanyaan referensi.</li>
+        <li>Referensi ditanyakan hanya bila belum terisi di CRM, maksimal 3 kali per sesi; pelanggan bisa membalas "lewati".</li>
+        <li>Pembuka dan pertanyaan referensi tidak memakai kuota AI. Lama sesi bot diatur di Pengaturan.</li>
+      </ul>
+    </details>
   </section>
 
   <section class="card space-y-4" aria-labelledby="h-kb">
@@ -132,31 +179,8 @@ function render() {
       <caption class="sr-only">Daftar entri basis pengetahuan</caption>
       <thead><tr class="bg-gray-50 border-b border-gray-200 text-gray-600 font-medium"><th scope="col" class="p-3">Aktif</th><th scope="col" class="p-3">Judul</th><th scope="col" class="p-3">Isi</th><th scope="col" class="p-3">Karakter</th><th scope="col" class="p-3">Aksi</th></tr></thead>
       <tbody id="k-rows" class="divide-y divide-gray-200"></tbody></table></div>
-    <form id="fb-form" class="space-y-2 border-t border-gray-100 pt-4">
-      ${field('Respons default (jika AI nonaktif atau belum diatur)', `<textarea name="fallbackMessage" rows="2" class="${INP}" ${dis}>${esc(S.fallbackMessage)}</textarea>`, VARS + '. Dikirim dengan jeda ulang yang sama seperti sebelumnya. Kosongkan agar bot diam.')}
-      ${canEdit ? `<button class="${BTN_LIGHT}">Simpan respons default</button>` : ''}
-    </form>
   </section>
-
-  <section class="card space-y-4" aria-labelledby="h-field">
-    <div><h2 id="h-field" class="text-xl font-bold">Pertanyaan Referensi untuk CRM</h2><p class="text-sm text-gray-600">Bot menanyakan dari mana pelanggan mengetahui bisnis Anda. Jawabannya tersimpan sebagai referensi lead (maksimal 50 karakter).</p></div>
-    <ul class="list-disc pl-5 text-sm text-gray-700 space-y-1">
-      <li>Ditanyakan hanya bila referensi lead masih kosong. Bila sudah terisi di CRM, tidak ditanyakan lagi.</li>
-      <li>Maksimal 3 kali per sesi (1 awal + 2 ulang). Jawaban pelanggan yang bukan pertanyaan disimpan sebagai referensi.</li>
-      <li>Pelanggan bisa membalas "lewati" untuk menghentikan pertanyaan pada sesi itu.</li>
-      <li>Referensi dibutuhkan agar lead bisa diajukan ke Acesio.</li>
-    </ul>
-    <form id="rf-form" class="space-y-2">
-      <label class="flex items-center gap-2 text-sm"><input type="checkbox" name="enabled" ${ref.enabled ? 'checked' : ''} ${dis}> Aktifkan pertanyaan referensi</label>
-      ${field('Pertanyaan bot', `<textarea name="question" rows="2" maxlength="500" class="${INP}" ${dis}>${esc(ref.question)}</textarea>`, VARS)}
-      <div id="rf-err" class="form-error" role="alert" hidden></div>
-      ${canEdit ? `<button class="${BTN_LIGHT}">Simpan pertanyaan referensi</button>` : ''}
-    </form>
-    <form id="cm-form" class="space-y-2 border-t border-gray-100 pt-4">
-      ${field('Pesan setelah semua data terkumpul', `<textarea name="completionMessage" rows="2" class="${INP}" ${dis}>${esc(S.completionMessage)}</textarea>`, VARS)}
-      ${canEdit ? `<button class="${BTN_LIGHT}">Simpan pesan penutup</button>` : ''}
-    </form>
-  </section></div>`;
+</div>`;
   paintKnowledge();
   bind();
 }
@@ -171,18 +195,22 @@ function bind() {
     download('basis-pengetahuan.md', knowledgeToMarkdown(list));
   };
   $('#k-search').oninput = debounce((e) => { query = e.target.value; paintKnowledge(); }, 200);
-  $('#op-form').onsubmit = (e) => { e.preventDefault(); commit({ openingMessage: String(new FormData(e.target).get('openingMessage') ?? '') }); };
-  $('#fb-form').onsubmit = (e) => { e.preventDefault(); commit({ fallbackMessage: String(new FormData(e.target).get('fallbackMessage') ?? '') }); };
-  $('#cm-form').onsubmit = (e) => { e.preventDefault(); commit({ completionMessage: String(new FormData(e.target).get('completionMessage') ?? '') }); };
-  $('#rf-form').onsubmit = (e) => {
+  $('#msg-form').onsubmit = (e) => {
     e.preventDefault();
-    const v = new FormData(e.target), box = $('#rf-err');
+    if (!canEdit) return;
+    const v = new FormData(e.target), box = $('#msg-err');
     try {
-      const requiredFields = buildReferensi({ enabled: v.get('enabled') === 'on', question: v.get('question') });
+      if (!greet.length) throw new Error('Daftar kata salam tidak boleh kosong.');
+      const requiredFields = buildReferensi({ enabled: v.get('refEnabled') === 'on', question: v.get('refQuestion') });
       box.hidden = true;
-      commit({ requiredFields });
+      commit({
+        openingMessage: String(v.get('openingMessage') ?? ''), completionMessage: String(v.get('completionMessage') ?? ''),
+        handoverMessage: String(v.get('handoverMessage') ?? ''), fallbackMessage: String(v.get('fallbackMessage') ?? ''),
+        greetingWords: [...greet], requiredFields,
+      });
     } catch (err) { box.textContent = err.message; box.hidden = false; }
   };
+  bindGreetings();
 
   root.onclick = async (e) => {
     const b = e.target.closest('button');

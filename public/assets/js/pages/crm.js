@@ -92,9 +92,9 @@ export async function mount(el) {
   <section class="space-y-6" aria-label="Statistik lead">
     <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-4 border-b border-gray-200 pb-4">
       <div><h2 class="text-2xl font-bold tracking-tight">Dashboard Laporan Analytics</h2><p class="text-sm text-gray-500">Ringkasan lead otomatis dari percakapan WhatsApp</p><p id="range" class="text-xs text-gray-400 mt-1"></p></div>
-      <div id="period" class="grid grid-cols-2 sm:flex bg-white border border-gray-300 rounded-lg p-1 text-sm shadow-sm" role="group" aria-label="Periode statistik">
-        ${Object.entries({ day: 'Harian (Hari Ini)', week: 'Mingguan (7 Hari)', month: 'Bulanan (Bulan Ini)', year: 'Tahunan (Tahun Ini)' })
-          .map(([k, v]) => `<button type="button" data-p="${k}" aria-pressed="${k === 'day'}" class="px-3 py-1.5 rounded-md text-center ${k === 'day' ? 'bg-gray-100 font-medium' : 'text-gray-600 hover:text-gray-900'}">${v}</button>`).join('')}
+      <div id="period" class="seg" role="group" aria-label="Periode statistik">
+        ${Object.entries({ day: 'Hari ini', week: '7 hari', month: 'Bulan ini', year: 'Tahun ini' })
+          .map(([k, v]) => `<button type="button" data-p="${k}" aria-pressed="${k === 'day'}" class="seg-btn">${v}</button>`).join('')}
       </div>
     </div>
     <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
@@ -136,7 +136,6 @@ export async function mount(el) {
     document.querySelectorAll('#period [data-p]').forEach((x) => {
       const on = x === b;
       x.setAttribute('aria-pressed', on);
-      x.classList.toggle('bg-gray-100', on); x.classList.toggle('font-medium', on); x.classList.toggle('text-gray-600', !on);
     });
     lastStatsKey = '';
     loadStats();
