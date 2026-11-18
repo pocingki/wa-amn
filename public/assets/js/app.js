@@ -11,10 +11,9 @@ const ROUTES = {
   '/percakapan': './pages/percakapan.js',
   '/crm': './pages/crm.js',
   '/bot-tester': './pages/tester.js',
-  '/integrasi': './pages/integrasi.js',
   '/pengaturan': './pages/pengaturan.js',
 };
-const TITLES = { '/pesan': 'Pesan', '/percakapan': 'Percakapan Masuk', '/crm': 'CRM', '/bot-tester': 'Bot Tester', '/integrasi': 'Integrasi', '/pengaturan': 'Pengaturan' };
+const TITLES = { '/pesan': 'Pesan', '/percakapan': 'Percakapan Masuk', '/crm': 'CRM', '/bot-tester': 'Bot Tester', '/pengaturan': 'Pengaturan' };
 let current = null;
 let navId = 0;
 let brand = 'Amnan';
@@ -43,12 +42,17 @@ async function go() {
     location.replace(savedPage() || '#/crm'); // hashchange memuat halaman yang sama dengan sebelum refresh
     return;
   }
-  let path = ROUTES[raw] ? raw : null;
-  if (path === '/integrasi' && !(await applyRole())) { // bukan admin: kembali ke CRM, bukan sekadar halaman kosong
-    toast('Menu Integrasi khusus Admin.', true);
-    location.replace('#/crm');
+  if (raw === '/integrasi') { // menu lama: Integrasi kini tab di Pengaturan
+    if (!(await applyRole())) { // bukan admin: kembali ke CRM, bukan sekadar halaman kosong
+      toast('Integrasi khusus Admin.', true);
+      location.replace('#/crm');
+      return;
+    }
+    try { sessionStorage.setItem('amn-pengaturan-tab', 'integrasi'); } catch { /* abaikan */ }
+    location.replace('#/pengaturan');
     return;
   }
+  let path = ROUTES[raw] ? raw : null;
   const id = ++navId;
   document.querySelectorAll('.nav-link').forEach((a) => {
     const on = a.dataset.r === path;

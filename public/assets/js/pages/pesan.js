@@ -1,7 +1,7 @@
 // Pesan: SATU tempat untuk semua pesan bot (pembuka, kata salam, referensi, penutup, serah-terima, respons default) + Basis Pengetahuan AI.
 import {
   $, esc, field, icon, INP, BTN_DARK, BTN_LIGHT, modal, toast, debounce, confirmDialog, getMe, isAdminRole,
-  loadSettings, getSettings, saveSettings, onSettingsChange, openSettingsHistory, fmtNum,
+  loadSettings, getSettings, saveSettings, onSettingsChange, fmtNum,
   KNOWLEDGE_LIMITS, knowledgeStats, knowledgeLimitError, validateKnowledgeEntry, filterKnowledge,
   knowledgeFromText, previewKnowledgeImport, knowledgeToMarkdown, newKnowledgeId,
 } from '../lib.js';
@@ -166,7 +166,6 @@ function render() {
       <div class="flex flex-wrap gap-2">
         ${canEdit ? `<button type="button" id="k-add" class="${BTN_DARK}" ${full ? 'disabled title="Batas jumlah entri tercapai"' : ''}>Tambah entri</button><button type="button" id="k-import" class="${BTN_LIGHT}">Impor</button>` : ''}
         <button type="button" id="k-export" class="${BTN_LIGHT}">Ekspor .md</button>
-        <button type="button" id="k-history" class="${BTN_LIGHT}">Riwayat versi</button>
       </div>
     </div>
     <div class="warn-box" role="note">${icon('info')}<span>Isi basis pengetahuan dikirim ke penyedia AI sebagai bahan jawaban. Jangan menulis data pribadi pelanggan, kata sandi, atau kunci API di sini.</span></div>
@@ -188,7 +187,6 @@ function render() {
 function bind() {
   $('#k-add')?.addEventListener('click', () => knowledgeModal());
   $('#k-import')?.addEventListener('click', () => importModal());
-  $('#k-history').onclick = openSettingsHistory;
   $('#k-export').onclick = () => {
     const list = knowledgeOf(S);
     if (!list.length) return toast('Belum ada entri untuk diekspor.', true);

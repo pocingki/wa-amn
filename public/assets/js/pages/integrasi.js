@@ -11,7 +11,7 @@ export async function mount(el) {
   freshCode = '';
   const me = await getMe();
   if (me && me.role && me.role !== 'admin') {
-    el.innerHTML = `<h1 class="sr-only">Integrasi</h1><div class="attn-banner" role="note">${icon('info')}<span>Menu Integrasi khusus Admin.</span></div>`;
+    el.innerHTML = `<h2 class="sr-only">Integrasi Booking Live</h2><div class="attn-banner" role="note">${icon('info')}<span>Menu Integrasi khusus Admin.</span></div>`;
     return;
   }
   await render();
@@ -25,8 +25,8 @@ async function render() {
   const connected = st.connected;
   const hook = st.webhook;
   const hookTxt = !hook ? '-' : hook.active ? (hook.lastStatus === 'ok' ? 'Aktif, terakhir terkirim ' + when(hook.lastAt) : hook.lastStatus ? 'Aktif, terakhir gagal: ' + hook.lastStatus : 'Aktif, belum ada kiriman') : 'Nonaktif (terlalu banyak gagal)';
-  root.innerHTML = `<h1 class="sr-only">Integrasi</h1>
-  <div class="max-w-2xl mx-auto space-y-6">
+  root.innerHTML = `<h2 class="sr-only">Integrasi Booking Live</h2>
+  <div class="space-y-6">
     <section class="card space-y-4" aria-labelledby="i-title">
       <div><h2 id="i-title" class="font-bold text-lg text-gray-900">Hubungkan Booking Live</h2>
         <p class="text-sm text-gray-600">Buat satu kode sambungan di sini, lalu tempel di menu <b>WhatsApp</b> pada Booking Live (di panel kiri). Tidak perlu mengisi berkas <code>.env</code>. Kabar ke aplikasi (lead, pesan masuk, status WhatsApp) dikirim sebagai webhook bertanda tangan dari halaman ini. Telegram untuk operator ada di Pengaturan.</p></div>

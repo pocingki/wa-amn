@@ -99,8 +99,6 @@ i.fa-solid, i.fa-regular, i.fa-brands { display: none; } /* sisa ikon Font Aweso
 .search-box { display: flex; align-items: center; gap: 8px; border: 1px solid #d1d5db; border-radius: 8px; padding: 6px 10px; background: #fff; }
 .search-box input { flex: 1; border: 0; outline: 0; font-size: 14px; min-width: 0; background: transparent; }
 .search-box:focus-within { outline: 2px solid var(--focus); }
-.history-list { list-style: none; margin: 0; padding: 0; max-height: 50vh; overflow-y: auto; }
-.history-list li { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 0; border-bottom: 1px solid #f3f4f6; }
 
 /* ---- dialog, toast, menu ---- */
 .dialog-backdrop { position: fixed; inset: 0; z-index: 60; background: rgba(0,0,0,.45); display: flex; align-items: center; justify-content: center; padding: 16px; }
@@ -370,3 +368,29 @@ a.b-file:hover { background: rgba(0,0,0,.1); }
 .seg-btn:hover { color: var(--brand); }
 .seg-btn[aria-pressed="true"] { background: #fff; color: var(--brand); box-shadow: 0 1px 3px rgba(8, 50, 132, .18); font-weight: 600; }
 .seg-btn:focus-visible { outline: 2px solid var(--brand); outline-offset: 1px; }
+
+/* ---- sub menu (tab) pengaturan ---- */
+.tabs { display: flex; gap: 4px; border-bottom: 1px solid #e5e7eb; margin-bottom: 20px; overflow-x: auto; scrollbar-width: none; }
+.tabs::-webkit-scrollbar { display: none; }
+.tab-btn { border: 0; background: transparent; padding: 10px 14px; font-size: 14px; font-weight: 500; color: #4b5563; white-space: nowrap; cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+.tab-btn:hover { color: var(--brand); }
+.tab-btn[aria-selected="true"] { color: var(--brand); border-bottom-color: var(--brand); font-weight: 600; }
+.tab-btn:focus-visible { outline: 2px solid var(--brand); outline-offset: -2px; border-radius: 6px; }
+
+/* ---- Pengajuan ke Acesio (CRM). Kelas sendiri agar tidak bergantung pada build Tailwind. ---- */
+.bg-emerald-50 { background-color: #ecfdf5; }
+.border-emerald-200 { border-color: #a7f3d0; }
+.text-emerald-700 { color: #047857; }
+.text-emerald-800 { color: #065f46; }
+.bg-emerald-600 { background-color: #059669; }
+.hover\:bg-emerald-700:hover { background-color: #047857; }
+.acs-head { padding: 24px; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 16px; border-bottom: 1px solid #e5e7eb; }
+.acs-note { margin: 0; padding: 14px 24px 0; font-size: 14px; }
+.acs-list { list-style: none; margin: 0; padding: 0; max-height: 20rem; overflow-y: auto; }
+.acs-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 24px; border-top: 1px solid #f3f4f6; }
+.acs-row:first-child { border-top: 0; }
+.acs-empty { margin: 0; padding: 24px; font-size: 14px; color: #6b7280; }
+.acs-who { min-width: 0; flex: 1 1 14rem; }
+.acs-name { margin: 0; font-weight: 500; color: #111827; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acs-meta { margin: 0; font-size: 12px; color: #6b7280; overflow-wrap: anywhere; }
+.acs-act { display: flex; gap: 8px; flex-shrink: 0; }

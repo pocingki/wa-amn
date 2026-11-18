@@ -63,6 +63,7 @@ export function adminOnly(method, pathname) {
   const p = pathname.length > 1 ? pathname.replace(/\/+$/, '') : pathname;
   if (p === '/api/users' || p.startsWith('/api/users/') || p === '/api/audit') return true;
   if (p === '/api/integrations' || p.startsWith('/api/integrations/')) return true; // kunci API & webhook: semua metode
+  if (p === '/api/acesio' || p.startsWith('/api/acesio/')) return true; // alamat & kunci Acesio: semua metode
   if (isWrite(m) && (p === '/api/settings' || p.startsWith('/api/settings/'))) return true;
   if (isWrite(m) && (p === '/api/data' || p.startsWith('/api/data/'))) return true;
   if (isWrite(m) && (p === '/api/brand' || p.startsWith('/api/brand/'))) return true; // logo/favicon

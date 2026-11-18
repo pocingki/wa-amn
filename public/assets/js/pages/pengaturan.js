@@ -1,13 +1,18 @@
-// Pengaturan: bot, salam, format nomor, pertanyaan wajib, serah-terima, ketahanan, retensi, notifikasi, koneksi WhatsApp (QR Baileys),
-// serta kartu Balasan AI, Kuota AI, dan Pemakaian AI. Mode API resmi (Convia) disembunyikan dari UI; kode backend tidak berubah.
+// Pengaturan dengan sub menu (tab): Umum, WhatsApp (QR Baileys + serah-terima), Balasan AI (kuota, pemakaian), Integrasi (Acesio, Booking Live),
+// Notifikasi & data (Telegram, retensi). Mode API resmi (Convia) disembunyikan dari UI; kode backend tidak berubah.
 import { checkBase, normalizeHex, paletteFrom, DEFAULT_PALETTE } from '../brand-color.js';
+import * as booking from './integrasi.js';
 import {
   $, api, send, esc, icon, field, INP, BTN_DARK, BTN_LIGHT, toast, poll, onEvent, confirmDialog, getMe, isAdminRole, waStatusView,
-  loadSettings, getSettings, saveSettings, onSettingsChange, openSettingsHistory,
+  loadSettings, getSettings, saveSettings, onSettingsChange,
 } from '../lib.js';
 
 let stopPoll = null, stopUsage = null, off = null, offEv = null, lastQr = null, canEdit = true, root, brandInfo = null;
-let keyState = null, keyEdit = false, usageState = { data: null, error: '' };
+const TAB_LIST = [['umum', 'Umum'], ['whatsapp', 'WhatsApp'], ['ai', 'Balasan AI'], ['integrasi', 'Integrasi'], ['notif', 'Notifikasi & data']];
+const TAB_KEY = 'amn-pengaturan-tab';
+const SAVE_TABS = ['umum', 'whatsapp', 'notif']; // tab yang memakai tombol Simpan pengaturan
+let tab = 'umum';
+let acesio = null, keyState = null, keyEdit = false, usageState = { data: null, error: '' };
 
 
 const RANGES = [
@@ -225,7 +230,7 @@ export async function mount(el) {
   const [, me, bi] = await Promise.all([loadSettings(), getMe().catch(() => null), api('/api/brand').catch(() => null)]);
   brandInfo = bi;
   canEdit = isAdminRole(me);
-  keyState = null; keyEdit = false; usageState = { data: null, error: '' };
+  acesio = null; keyState = null; keyEdit = false; usageState = { data: null, error: '' };
   off = onSettingsChange((s, src) => { if (src !== 'save') render(); });
   render();
   offEv = onEvent('wa:status', () => pollWA());
@@ -233,7 +238,7 @@ export async function mount(el) {
   stopUsage = poll(loadUsage, 60000); // muat ulang ringan tiap menit (hanya saat tab terlihat)
 }
 
-export function unmount() { stopPoll?.(); stopUsage?.(); off?.(); offEv?.(); stopPoll = stopUsage = off = offEv = null; }
+export function unmount() { booking.unmount(); stopPoll?.(); stopUsage?.(); off?.(); offEv?.(); stopPoll = stopUsage = off = offEv = null; }
 
 /** Warna utama: pemilih warna + kode hex + pratinjau palet (rumus sama dengan server). */
 function colorField(S, dis) {
@@ -318,6 +323,37 @@ function bindBrand() {
   };
 }
 
+/** Sub menu (tab): hanya satu bagian tampil. Semua bagian tetap ada di halaman, jadi satu tombol Simpan tetap membaca semua kolom. */
+function pickTab(k) {
+  const keys = TAB_LIST.map(([x]) => x).filter((x) => canEdit || x !== 'integrasi');
+  tab = keys.includes(k) ? k : 'umum';
+  try { sessionStorage.setItem(TAB_KEY, tab); } catch { /* penyimpanan tidak tersedia: tab tetap jalan */ }
+  document.querySelectorAll('#view [data-panel]').forEach((el) => { el.hidden = el.dataset.panel !== tab; });
+  document.querySelectorAll('#view [data-tab]').forEach((b) => {
+    const on = b.dataset.tab === tab;
+    b.setAttribute('aria-selected', String(on));
+    b.tabIndex = on ? 0 : -1;
+  });
+  const save = $('#s-save');
+  if (save) save.hidden = !SAVE_TABS.includes(tab);
+  if (tab === 'integrasi') booking.mount($('#booking-box')).catch((e) => toast(e.message, true));
+}
+
+function bindTabs() {
+  let want = tab;
+  try { want = sessionStorage.getItem(TAB_KEY) || tab; } catch { /* abaikan */ }
+  const list = document.querySelector('#view [role=tablist]');
+  list.onclick = (e) => { const b = e.target.closest('[data-tab]'); if (b) pickTab(b.dataset.tab); };
+  list.onkeydown = (e) => {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return;
+    const bs = [...list.querySelectorAll('[data-tab]')];
+    const i = bs.findIndex((b) => b.dataset.tab === tab);
+    const n = e.key === 'Home' ? 0 : e.key === 'End' ? bs.length - 1 : (i + (e.key === 'ArrowRight' ? 1 : -1) + bs.length) % bs.length;
+    e.preventDefault(); pickTab(bs[n].dataset.tab); bs[n].focus();
+  };
+  pickTab(want);
+}
+
 function render() {
   const S = getSettings(), N = S.notify || {};
   const A = { ...AI_DEFAULTS, ...(S.ai && typeof S.ai === 'object' ? S.ai : {}) };
@@ -326,10 +362,11 @@ function render() {
   const num = (name, label, hint, min, max) => field(label, `<input name="${name}" type="number" min="${min}" max="${max}" step="1" class="${INP}" value="${esc(S[name] ?? N[name] ?? '')}" ${dis}>`, hint);
   root.innerHTML = `<h1 class="sr-only">Pengaturan</h1>
   ${canEdit ? '' : `<div class="attn-banner mb-6" role="note">${icon('info')}<span>Anda masuk sebagai Agen: pengaturan hanya bisa dilihat. Perubahan dan pemutusan WhatsApp khusus Admin.</span></div>`}
-  <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
-    <form id="s-form" class="card space-y-6" novalidate>
-      <div class="flex items-start justify-between gap-3"><div><h2 class="font-bold text-lg text-gray-900">Pengaturan Bot</h2><p class="text-sm text-gray-600">Berlaku untuk WhatsApp asli dan Bot Tester${S.version != null ? ` &middot; versi ${esc(S.version)}` : ''}</p></div>
-        <button type="button" id="s-history" class="${BTN_LIGHT} shrink-0">Riwayat versi</button></div>
+  <div class="max-w-3xl">
+  <div class="tabs" role="tablist" aria-label="Bagian pengaturan">${TAB_LIST.filter(([k]) => canEdit || k !== 'integrasi').map(([k, l]) => `<button type="button" role="tab" id="tab-${k}" data-tab="${k}" class="tab-btn" aria-selected="false" aria-controls="panel-${k}">${l}</button>`).join('')}</div>
+  <form id="s-form" novalidate>
+    <div data-panel="umum" class="card space-y-6">
+      <div><h2 class="font-bold text-lg text-gray-900">Umum</h2><p class="text-sm text-gray-600">Berlaku untuk WhatsApp asli dan Bot Tester</p></div>
 
       <fieldset class="space-y-4"><legend class="font-semibold text-brand-800 mb-2">Bot &amp; brand</legend>
         ${chk('botEnabled', S.botEnabled, 'Bot aktif (membalas chat otomatis)', '', dis)}
@@ -344,7 +381,9 @@ function render() {
         ${num('botDurationMinutes', 'Batas durasi bot aktif (menit)', '0 = tanpa batas. Menentukan satu "sesi" untuk pengulangan pertanyaan referensi. Tidak memicu pesan pembuka ulang.', 0, 10080)}
       </fieldset>
 
-      <p class="text-sm text-gray-600 border-t border-gray-100 pt-4">Pesan pembuka, kata salam, pertanyaan referensi, pesan serah-terima, dan respons default ada di halaman <a href="#/pesan" class="underline font-medium">Pesan</a>.</p>
+
+      <p class="text-sm text-gray-600">Pesan pembuka, kata salam, pertanyaan referensi, pesan serah-terima, dan respons default ada di halaman <a href="#/pesan" class="underline font-medium">Pesan</a>.</p>
+
 
       <fieldset class="space-y-3 border-t border-gray-100 pt-4"><legend class="font-semibold text-brand-800 mb-2">Format nomor telepon</legend>
         <p class="text-sm text-gray-600">Hanya mengubah tampilan. Nomor tersimpan tetap berupa angka.</p>
@@ -353,33 +392,8 @@ function render() {
           <span class="min-w-0"><span class="block font-medium text-gray-900">${label}</span><span class="block text-xs text-gray-600">Contoh: <code class="break-all">${esc(formatPhone(SAMPLE_PHONE, val))}</code></span></span></label>`).join('')}
       </fieldset>
 
-      <fieldset class="space-y-4 border-t border-gray-100 pt-4"><legend class="font-semibold text-brand-800 mb-2">Serah-terima &amp; ketahanan</legend>
-        ${chk('autoTakeoverOnPhoneReply', S.autoTakeoverOnPhoneReply, 'Otomatis ambil alih saat admin membalas dari HP', 'Bila admin membalas langsung lewat aplikasi WhatsApp di HP, bot berhenti membalas percakapan itu.', dis)}
-        ${num('adminAutoReturnMinutes', 'Bot aktif kembali otomatis setelah admin tidak membalas (menit)', '0 = mati (bot tetap diam sampai Anda mengembalikannya manual). Jika diisi, saat pelanggan chat lagi dan admin sudah tidak aktif (tidak membalas atau mengambil alih) lebih lama dari ini, percakapan kembali ke mode bot.', 0, 10080)}
-        ${num('staleMinutes', 'Batas pesan basi (menit)', 'Pesan yang lebih lama dari ini (mis. terkirim saat bot mati) tidak dibalas bot dan ditandai perlu perhatian.', 1, 1440)}
-        ${num('fallbackCooldownMinutes', 'Jeda respons default (menit)', 'Respons default tidak dikirim berulang ke nomor yang sama dalam rentang ini. 0 = tanpa jeda.', 0, 1440)}
-        ${num('sendRateLimitPerMinute', 'Batas kirim per menit', 'Melindungi nomor WhatsApp dari pemblokiran karena mengirim terlalu cepat.', 1, 600)}
-      </fieldset>
-
-      <fieldset class="space-y-4 border-t border-gray-100 pt-4"><legend class="font-semibold text-brand-800 mb-2">Retensi data</legend>
-        ${num('retentionDays', 'Hapus percakapan lama setelah (hari)', '0 = dimatikan (data disimpan selamanya). Bila diisi, percakapan yang lebih lama akan dihapus PERMANEN secara berkala.', 0, 3650)}
-      </fieldset>
-
-      <fieldset class="space-y-4 border-t border-gray-100 pt-4"><legend class="font-semibold text-brand-800 mb-2">Notifikasi operator (Telegram)</legend>
-        <p class="text-sm text-gray-600">Kabar lead hot, WhatsApp putus, dan percakapan yang perlu perhatian dikirim ke Telegram. Nama dan nomor tersamar, isi pesan tidak ikut. Webhook bertanda tangan ke aplikasi lain diatur di menu Integrasi, bukan di sini.</p>
-        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
-          ${field('Token bot Telegram', `<input name="telegramBotToken" type="password" autocomplete="off" class="${INP}" value="${esc(N.telegramBotToken || '')}" ${dis}>`, 'Rahasia: jangan dibagikan.')}
-          ${field('Chat ID Telegram', `<input name="telegramChatId" autocomplete="off" class="${INP}" value="${esc(N.telegramChatId || '')}" ${dis}>`)}
-        </div>
-        ${chk('onHot', N.onHot, 'Kabari saat ada lead Hot', '', dis)}
-        ${chk('onDisconnected', N.onDisconnected, 'Kabari saat WhatsApp terputus', '', dis)}
-        ${num('attentionMinutes', 'Pengingat perlu perhatian (menit)', 'Kabari bila percakapan yang butuh admin belum ditangani selama ini. 0 = mati.', 0, 1440)}
-      </fieldset>
-
-      <div id="s-err" class="form-error" role="alert" hidden></div>
-      ${canEdit ? `<button class="${BTN_DARK}">Simpan pengaturan</button>` : ''}
-    </form>
-
+    </div>
+    <div data-panel="whatsapp" class="space-y-6" hidden>
     <div class="card space-y-4">
       <div><h2 class="font-bold text-lg text-gray-900">Koneksi WhatsApp</h2><p class="text-sm text-gray-600">Tautkan nomor WhatsApp lewat scan QR (Baileys), lalu pantau statusnya</p></div>
       <div class="border border-gray-200 rounded-xl p-4 bg-gray-50 space-y-2 text-sm" aria-live="polite">
@@ -396,13 +410,50 @@ function render() {
         <li>Buka WhatsApp di HP, masuk ke Perangkat Tertaut.</li><li>Pilih Tautkan Perangkat, lalu scan QR di atas.</li><li>Setelah TERHUBUNG, chat masuk ke nomor tersebut diproses bot.</li>
       </ol>
     </div>
-  </div>
-  ${aiSectionHTML(A, dis)}`;
+      <div class="card space-y-6">
+      <fieldset class="space-y-4"><legend class="font-semibold text-brand-800 mb-2">Serah-terima &amp; ketahanan</legend>
+        ${chk('autoTakeoverOnPhoneReply', S.autoTakeoverOnPhoneReply, 'Otomatis ambil alih saat admin membalas dari HP', 'Bila admin membalas langsung lewat aplikasi WhatsApp di HP, bot berhenti membalas percakapan itu.', dis)}
+        ${num('adminAutoReturnMinutes', 'Bot aktif kembali otomatis setelah admin tidak membalas (menit)', '0 = mati (bot tetap diam sampai Anda mengembalikannya manual). Jika diisi, saat pelanggan chat lagi dan admin sudah tidak aktif (tidak membalas atau mengambil alih) lebih lama dari ini, percakapan kembali ke mode bot.', 0, 10080)}
+        ${num('staleMinutes', 'Batas pesan basi (menit)', 'Pesan yang lebih lama dari ini (mis. terkirim saat bot mati) tidak dibalas bot dan ditandai perlu perhatian.', 1, 1440)}
+        ${num('fallbackCooldownMinutes', 'Jeda respons default (menit)', 'Respons default tidak dikirim berulang ke nomor yang sama dalam rentang ini. 0 = tanpa jeda.', 0, 1440)}
+        ${num('sendRateLimitPerMinute', 'Batas kirim per menit', 'Melindungi nomor WhatsApp dari pemblokiran karena mengirim terlalu cepat.', 1, 600)}
+      </fieldset>
+
+      </div>
+    </div>
+    <div data-panel="notif" class="card space-y-6" hidden>
+      <div><h2 class="font-bold text-lg text-gray-900">Notifikasi &amp; data</h2></div>
+      <fieldset class="space-y-4"><legend class="font-semibold text-brand-800 mb-2">Notifikasi operator (Telegram)</legend>
+        <p class="text-sm text-gray-600">Kabar lead hot, WhatsApp putus, dan percakapan yang perlu perhatian dikirim ke Telegram. Nama dan nomor tersamar, isi pesan tidak ikut. Webhook bertanda tangan ke aplikasi lain diatur di tab Integrasi.</p>
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          ${field('Token bot Telegram', `<input name="telegramBotToken" type="password" autocomplete="off" class="${INP}" value="${esc(N.telegramBotToken || '')}" ${dis}>`, 'Rahasia: jangan dibagikan.')}
+          ${field('Chat ID Telegram', `<input name="telegramChatId" autocomplete="off" class="${INP}" value="${esc(N.telegramChatId || '')}" ${dis}>`)}
+        </div>
+        ${chk('onHot', N.onHot, 'Kabari saat ada lead Hot', '', dis)}
+        ${chk('onDisconnected', N.onDisconnected, 'Kabari saat WhatsApp terputus', '', dis)}
+        ${num('attentionMinutes', 'Pengingat perlu perhatian (menit)', 'Kabari bila percakapan yang butuh admin belum ditangani selama ini. 0 = mati.', 0, 1440)}
+      </fieldset>
+
+
+      <fieldset class="space-y-4 border-t border-gray-100 pt-4"><legend class="font-semibold text-brand-800 mb-2">Retensi data</legend>
+        ${num('retentionDays', 'Hapus percakapan lama setelah (hari)', '0 = dimatikan (data disimpan selamanya). Bila diisi, percakapan yang lebih lama akan dihapus PERMANEN secara berkala.', 0, 3650)}
+      </fieldset>
+
+    </div>
+    <div id="s-save" class="space-y-3 mt-6">
+      <div id="s-err" class="form-error" role="alert" hidden></div>
+      ${canEdit ? `<button class="${BTN_DARK}">Simpan pengaturan</button>` : ''}
+    </div>
+  </form>
+  <div data-panel="ai" hidden>${aiSectionHTML(A, dis)}</div>
+  ${canEdit ? `<div data-panel="integrasi" hidden>${acesioSectionHTML()}<div id="booking-box" class="mt-6"></div></div>` : ''}
+  </div>`;
   lastQr = null;
 
-  $('#s-history').onclick = openSettingsHistory;
+  bindTabs();
   bindBrand();
   bindAi();
+  bindAcesio();
   paintUsage();
   $('#s-form').onsubmit = async (e) => {
     e.preventDefault();
@@ -551,6 +602,62 @@ function showTest(r) {
   const kind = !r.ok && r.kind ? KIND_LABEL[r.kind] || '' : '';
   el.className = 'text-sm break-words ' + (r.ok ? 'text-green-800' : 'text-red-800');
   el.innerHTML = `<span class="inline-flex items-center gap-1 font-medium">${icon(r.ok ? 'ok' : 'x-circle')} ${r.ok ? 'Koneksi berhasil' : esc(kind || 'Koneksi gagal')}</span>${r.message ? `<span class="block">${esc(r.message)}</span>` : ''}`;
+}
+
+/* ====================================================================
+   Koneksi Acesio: alamat + kunci diisi di sini (bukan .env). Kunci tulis-saja, tidak pernah ditampilkan lagi.
+   ==================================================================== */
+function acesioSectionHTML() {
+  return `<section class="card space-y-3" style="margin-top:1.5rem" aria-labelledby="acs-h">
+    <div><h2 id="acs-h" class="font-bold text-lg text-gray-900">Koneksi Acesio</h2>
+    <p class="text-sm text-gray-600">Dipakai tombol "Kirim Data ke Acesio" pada Hot Lead tahap Won. Buat kunci di Acesio (menu Integrasi, bagian "Kunci untuk server WhatsApp"), lalu tempel di sini.</p></div>
+    <div id="acs-box" class="space-y-3"><p class="text-sm text-gray-600">Memuat…</p></div>
+  </section>`;
+}
+
+function paintAcesio() {
+  const box = $('#acs-box');
+  if (!box) return;
+  if (!acesio) { box.innerHTML = '<p class="text-sm text-gray-600">Memuat…</p>'; return; }
+  const dis = canEdit ? '' : 'disabled';
+  const src = acesio.keySource === 'dashboard' ? 'tersimpan' : acesio.keySource === 'env' ? 'dari berkas .env' : 'belum ada';
+  const tone = acesio.hasKey ? 'text-green-800' : 'text-amber-800';
+  box.innerHTML = `
+    ${field('Alamat Acesio', `<input id="acs-url" class="${INP}" value="${esc(acesio.url)}" maxlength="200" placeholder="https://acesio.contoh.id" autocomplete="off" spellcheck="false" ${dis}>`, 'Bila Acesio satu server dengan WhatsApp, biarkan http://127.0.0.1:3000.')}
+    ${field('Kunci Acesio', `<input id="acs-key" type="password" class="${INP}" maxlength="512" autocomplete="off" spellcheck="false" placeholder="${acesio.hasKey ? 'Biarkan kosong untuk tetap memakai kunci sekarang' : 'Tempel kunci dari Acesio'}" ${dis}>`, '')}
+    <p class="text-sm font-medium">Kunci: <span class="font-bold ${tone}">${esc(src)}</span></p>
+    <div id="acs-msg" class="text-sm" role="status" hidden></div>
+    ${canEdit ? `<div class="flex gap-2 flex-wrap"><button type="button" id="acs-save" class="${BTN_DARK}">Simpan</button><button type="button" id="acs-test" class="${BTN_LIGHT}">Tes sambungan</button>${acesio.keySource === 'dashboard' ? `<button type="button" id="acs-del" class="${BTN_LIGHT}">Hapus kunci</button>` : ''}</div>` : ''}`;
+}
+
+function bindAcesio() {
+  api('/api/acesio').then((r) => { acesio = r; paintAcesio(); }).catch(() => { acesio = { url: '', hasKey: false, keySource: 'none' }; paintAcesio(); });
+  const box = $('#acs-box');
+  if (!box || !canEdit) return;
+  const say = (text, ok) => { const m = $('#acs-msg'); if (!m) return; m.textContent = text; m.className = `text-sm ${ok ? 'text-green-800' : 'text-red-800'}`; m.hidden = false; };
+  box.onclick = async (e) => {
+    const id = e.target.closest('button')?.id;
+    if (!id) return;
+    const btn = e.target.closest('button');
+    try {
+      if (id === 'acs-save') {
+        const body = { url: $('#acs-url').value };
+        const k = $('#acs-key').value.trim();
+        if (k) body.key = k;
+        btn.disabled = true;
+        acesio = await send('/api/acesio', body, 'PUT');
+        paintAcesio(); toast('Sambungan Acesio tersimpan');
+      } else if (id === 'acs-test') {
+        btn.disabled = true;
+        const r = await send('/api/acesio/test', {}, 'POST');
+        say(r.message, r.ok); btn.disabled = false;
+      } else if (id === 'acs-del') {
+        if (!(await confirmDialog('Hapus kunci Acesio?', 'Tombol "Kirim Data ke Acesio" berhenti bekerja sampai kunci diisi lagi.', { okText: 'Hapus', danger: true }))) return;
+        acesio = await api('/api/acesio', { method: 'DELETE' });
+        paintAcesio(); toast('Kunci Acesio dihapus');
+      }
+    } catch (err) { toast(err.message, true); btn.disabled = false; }
+  };
 }
 
 function bindAi() {
