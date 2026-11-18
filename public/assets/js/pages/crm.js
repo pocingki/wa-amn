@@ -48,6 +48,7 @@ export function readinessOf(l) {
 
 let alive = false, phoneFmt = 'digits', meta = { statuses: [], dataTypes: [], hotStages: [], platforms: [] }, tz = 'Asia/Jakarta', period = 'day', me = { name: '', role: '' }, labels = {};
 let data = { leads: [], total: 0, page: 1, pageSize: PAGE_SIZE };
+let acsQ = null, acsBusy = false, acsSeq = 0;
 let listTimer = null, statsTimer = null, searchTimer = null, listSeq = 0, statsSeq = 0, lastKey = '', lastStatsKey = '';
 const f = { ...DEFAULT_F };
 const observers = new Set();
@@ -74,6 +75,7 @@ const check = (id, text) => `<label class="flex items-center gap-1.5 text-sm tex
 export async function mount(el) {
   alive = true;
   Object.assign(f, DEFAULT_F);
+  acsQ = null; acsBusy = false; acsSeq++;
   period = 'day'; lastKey = ''; lastStatsKey = ''; tz = 'Asia/Jakarta'; phoneFmt = 'digits';
   meta = { statuses: [], dataTypes: [], hotStages: [], platforms: [] };
   data = { leads: [], total: 0, page: 1, pageSize: PAGE_SIZE };
@@ -92,9 +94,9 @@ export async function mount(el) {
   <section class="space-y-6" aria-label="Statistik lead">
     <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-4 border-b border-gray-200 pb-4">
       <div><h2 class="text-2xl font-bold tracking-tight">Dashboard Laporan Analytics</h2><p class="text-sm text-gray-500">Ringkasan lead otomatis dari percakapan WhatsApp</p><p id="range" class="text-xs text-gray-400 mt-1"></p></div>
-      <div id="period" class="grid grid-cols-2 sm:flex bg-white border border-gray-300 rounded-lg p-1 text-sm shadow-sm" role="group" aria-label="Periode statistik">
-        ${Object.entries({ day: 'Harian (Hari Ini)', week: 'Mingguan (7 Hari)', month: 'Bulanan (Bulan Ini)', year: 'Tahunan (Tahun Ini)' })
-          .map(([k, v]) => `<button type="button" data-p="${k}" aria-pressed="${k === 'day'}" class="px-3 py-1.5 rounded-md text-center ${k === 'day' ? 'bg-gray-100 font-medium' : 'text-gray-600 hover:text-gray-900'}">${v}</button>`).join('')}
+      <div id="period" class="seg" role="group" aria-label="Periode statistik">
+        ${Object.entries({ day: 'Hari ini', week: '7 hari', month: 'Bulan ini', year: 'Tahun ini' })
+          .map(([k, v]) => `<button type="button" data-p="${k}" aria-pressed="${k === 'day'}" class="seg-btn">${v}</button>`).join('')}
       </div>
     </div>
     <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
@@ -108,6 +110,14 @@ export async function mount(el) {
       ${chartBox('Funnel Konversi Status Lead', 'c-funnel', 'Progres lead dari pesan pertama hingga closing (Menunggu data...)')}
       ${chartBox('Sumber Leads', 'c-source', 'Berdasarkan pencocokan kata kunci (Menunggu data...)')}
     </div>
+  </section>
+
+  <section id="acs-queue" class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden" aria-labelledby="acs-q-h">
+    <div class="acs-head">
+      <div><h3 id="acs-q-h" class="font-bold text-lg text-gray-900">Pengajuan ke Acesio</h3><p class="text-sm text-gray-500">Hot Leads tahap Won yang belum diajukan. Ajukan satu per satu atau semua yang datanya lengkap sekaligus.</p></div>
+      <button type="button" id="acs-all" class="${BTN} bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-40" disabled>Ajukan semua</button>
+    </div>
+    <div id="acs-body" aria-live="polite"><p class="acs-empty">Memuat…</p></div>
   </section>
 
   <section class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden" aria-label="Daftar lead">
@@ -129,6 +139,7 @@ export async function mount(el) {
   </section>
   </div>`;
 
+  bindAcsQueue();
   $('#period').onclick = (e) => {
     const b = e.target.closest('[data-p]');
     if (!b) return;
@@ -136,7 +147,6 @@ export async function mount(el) {
     document.querySelectorAll('#period [data-p]').forEach((x) => {
       const on = x === b;
       x.setAttribute('aria-pressed', on);
-      x.classList.toggle('bg-gray-100', on); x.classList.toggle('font-medium', on); x.classList.toggle('text-gray-600', !on);
     });
     lastStatsKey = '';
     loadStats();
@@ -169,7 +179,7 @@ export async function mount(el) {
   };
   $('#list-area').onclick = onListClick;
 
-  await Promise.all([loadList(), loadStats()]);
+  await Promise.all([loadList(), loadStats(), loadAcsQueue()]);
   if (!alive) return;
   document.addEventListener('visibilitychange', onVisibility);
   document.addEventListener('copy', onCopy);
@@ -200,7 +210,7 @@ function onCopy(e) {
 // ---------- polling ----------
 function startTimers() {
   if (!listTimer) listTimer = setInterval(() => loadList(), 5000);
-  if (!statsTimer) statsTimer = setInterval(() => loadStats(), 15000);
+  if (!statsTimer) statsTimer = setInterval(() => { loadStats(); loadAcsQueue(); }, 15000);
 }
 function stopTimers() {
   clearInterval(listTimer); clearInterval(statsTimer);
@@ -209,7 +219,7 @@ function stopTimers() {
 function onVisibility() {
   if (!alive) return;
   if (document.hidden) { stopTimers(); return; }
-  startTimers(); loadList(); loadStats();
+  startTimers(); loadList(); loadStats(); loadAcsQueue();
 }
 
 function qs(withPage = true) {
@@ -426,7 +436,78 @@ async function onListClick(e) {
   }
 }
 
-function refreshAll() { lastKey = ''; lastStatsKey = ''; loadList(); loadStats(); }
+// ---------- kotak pengajuan ke Acesio ----------
+async function loadAcsQueue() {
+  if (!alive || acsBusy) return;
+  const seq = ++acsSeq;
+  try {
+    const q = await api('/api/leads/acesio/queue');
+    if (!alive || seq !== acsSeq) return;
+    acsQ = q;
+  } catch (e) {
+    if (!alive || seq !== acsSeq) return;
+    acsQ = { error: e.message, items: [], counts: { ready: 0, incomplete: 0, failed: 0, total: 0 }, configured: true };
+  }
+  paintAcsQueue();
+}
+
+function paintAcsQueue() {
+  const body = $('#acs-body'), allBtn = $('#acs-all');
+  if (!body || !allBtn || !acsQ) return;
+  const { items, counts, configured, error } = acsQ;
+  allBtn.disabled = acsBusy || !configured || counts.ready === 0;
+  allBtn.textContent = counts.ready ? `Ajukan semua (${counts.ready})` : 'Ajukan semua';
+  const note = error ? `<p class="acs-note text-red-700" role="alert">${esc(error)}</p>`
+    : !configured ? '<p class="acs-note text-amber-800" role="status">Sambungan Acesio belum diisi. Isi alamat dan kunci di <a class="underline font-medium" href="#/pengaturan">Pengaturan, tab Integrasi</a>.</p>'
+      : counts.incomplete ? `<p class="acs-note text-gray-600">${counts.incomplete} lead belum bisa diajukan karena datanya kurang. "Ajukan semua" hanya mengirim yang lengkap.</p>` : '';
+  if (!items.length) { body.innerHTML = `${note}<p class="acs-empty">Tidak ada lead yang menunggu pengajuan.</p>`; return; }
+  body.innerHTML = `${note}<ul class="acs-list">${items.map((i) => {
+    const badge = i.ready
+      ? (i.acesioStatus === 'failed' ? `<span class="text-xs font-medium text-red-700">Gagal diajukan${i.acesioLastError ? ': ' + esc(i.acesioLastError) : ''}</span>` : '<span class="text-xs font-medium text-emerald-700">Siap diajukan</span>')
+      : `<span class="text-xs font-medium text-amber-700">Data kurang: ${esc(i.missing.join(', '))}</span>`;
+    return `<li class="acs-row">
+      <div class="acs-who"><p class="acs-name">${esc(i.name || 'Tanpa nama')}</p>
+      <p class="acs-meta">${esc(fmtPhone(i.phone))}${i.referensi ? ' &middot; ' + esc(i.referensi) : ''}</p>${badge}</div>
+      <div class="acs-act">
+        <button type="button" data-acs-open="${esc(i.id)}" class="${BTN} bg-white border border-gray-300 text-gray-700 hover:bg-gray-50">${i.ready ? 'Lihat' : 'Lengkapi'}</button>
+        <button type="button" data-acs-one="${esc(i.id)}" class="${BTN} bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-40" ${i.ready && configured && !acsBusy ? '' : 'disabled'}>${i.acesioStatus === 'failed' ? 'Coba lagi' : 'Ajukan'}</button>
+      </div></li>`;
+  }).join('')}</ul>`;
+}
+
+async function acsSubmit(url, okMsg) {
+  if (acsBusy) return;
+  acsBusy = true; paintAcsQueue();
+  try {
+    const res = await send(url, {});
+    if (res.queue) acsQ = res.queue;
+    toast(okMsg(res), res.failed > 0);
+  } catch (e) { toast(e.message, true); }
+  acsBusy = false;
+  refreshAll();
+}
+
+function bindAcsQueue() {
+  $('#acs-all').onclick = () => {
+    if (!acsQ?.counts.ready) return;
+    if (!confirm(`Ajukan ${acsQ.counts.ready} lead ke Acesio sekarang?`)) return;
+    acsSubmit('/api/leads/acesio/submit-all', (r) => (r.failed
+      ? `${r.sent + r.replayed} berhasil, ${r.failed} gagal. Yang gagal tetap ada di daftar.`
+      : `${r.sent + r.replayed} lead diajukan ke Acesio${r.replayed ? ` (${r.replayed} sudah ada di Acesio)` : ''}.`));
+  };
+  $('#acs-body').onclick = (e) => {
+    const one = e.target.closest('[data-acs-one]');
+    if (one) {
+      const it = acsQ?.items.find((x) => x.id === one.dataset.acsOne);
+      acsSubmit(`/api/leads/${encodeURIComponent(one.dataset.acsOne)}/send-to-acesio`, (r) => (r.lead?.acesioReplayed || r.replayed ? `${it?.name || 'Lead'}: sudah ada di Acesio (tidak diperbarui)` : `${it?.name || 'Lead'} diajukan ke Acesio.`));
+      return;
+    }
+    const op = e.target.closest('[data-acs-open]');
+    if (op) openEdit(op.dataset.acsOpen, op);
+  };
+}
+
+function refreshAll() { lastKey = ''; lastStatsKey = ''; loadList(); loadStats(); loadAcsQueue(); }
 
 // ---------- modal edit ----------
 const sel = (name, opts, cur) => `<select name="${name}" class="${INP}">${opts.map((o) => `<option ${o === cur ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select>`;

@@ -252,13 +252,6 @@ test('parseOptions', () => {
   assert.deepEqual(lib.parseOptions('A\nB, A | C'), ['A', 'B', 'C']);
 });
 
-test('normHistory menerima beberapa bentuk', () => {
-  const h = lib.normHistory({ history: [{ version: 2, updatedAt: 5, updatedBy: 'x', changes: ['a', 'b'] }, { version: 3, ts: 9 }, { foo: 1 }] });
-  assert.deepEqual(h.map((x) => x.version), [3, 2]);
-  assert.equal(h[1].summary, 'a, b');
-  assert.equal(lib.normHistory([{ version: 1 }]).length, 1);
-});
-
 test('percakapan: filterConversations', () => {
   const l = [
     { phone: '1', name: 'Budi', needsAttention: true, last: { text: 'sakit lutut' } },

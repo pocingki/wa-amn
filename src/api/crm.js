@@ -7,6 +7,7 @@ import * as store from '../store.js';
 import * as C from '../conversations.js';
 import * as L from '../leads.js';
 import * as settings from '../settings.js';
+import { getLink as getAcesioLink } from '../acesio-link.js';
 
 const DEFAULT_TZ = 'Asia/Jakarta';
 const SORTS = ['createdAt', 'lastContactAt', 'name', 'status', 'platform'];
@@ -115,6 +116,7 @@ export function acesioReadiness(lead) {
   return { eligible, ready: eligible && missing.length === 0, missing };
 }
 
+const MISSING_SHORT = { phone: 'Nomor telepon', referensi: 'Referensi', name: 'Nama' };
 const MISSING_TEXT = {
   phone: 'Nomor telepon customer belum diketahui (hanya ID pengganti/LID). Isi nomor telepon di data customer',
   referensi: 'Referensi (customer tahu dari mana) belum diisi',
@@ -283,6 +285,124 @@ function validDate(s) {
 }
 
 // ---------- handler utama ----------
+// ---------- pengajuan ke Acesio (satu lead; dipakai tombol per lead dan "Ajukan semua") ----------
+/** Mengirim satu lead ke Acesio. Mengembalikan { status, body } (tidak menulis respons HTTP sendiri). */
+async function submitToAcesio(cur, ctx) {
+  const send = (status, body) => ({ status, body });
+  const fail = (status, msg) => send(status, { error: msg });
+  const l = norm(cur);
+  const id = l.id;
+  if (l.status !== 'Hot Leads') {
+    return fail(400, 'Hanya Hot Leads yang dapat dikirim ke Acesio');
+  }
+  if (l.hotStage !== 'Won') {
+    return fail(400, 'Tingkatan Hot Lead harus sudah mencapai tahap Won untuk dikirim ke Acesio');
+  }
+
+  const ready = acesioReadiness(l);
+  if (!ready.ready) {
+    const error = `Data customer belum lengkap untuk dikirim ke Acesio. ${ready.missing.map((k) => MISSING_TEXT[k]).join('. ')}.`;
+    return send(400, { error, missing: ready.missing });
+  }
+  const { url: acesioUrl, key: acesioKey } = getAcesioLink(); // dari Pengaturan (dashboard), cadangan .env
+  if (!acesioKey) return fail(503, 'Integrasi Acesio belum dikonfigurasi: isi alamat dan kunci Acesio di Pengaturan (atau ACESIO_BOT_KEY di .env).');
+  if (acesioInflight.has(l.id)) return fail(409, 'Pengiriman ke Acesio untuk lead ini masih berjalan. Tunggu hasilnya.');
+
+  const cid = randomUUID(); // correlation ID: dikirim ke Acesio, dicatat di log, audit, dan respons
+  const timeoutMs = Math.min(60000, Math.max(1000, Number(process.env.ACESIO_TIMEOUT_MS) || 10000));
+  const payload = {
+    name: String(l.name).trim(),
+    phone: canonPhone(l.phone) || String(l.phone).replace(/\D/g, ''),
+    platform: String(l.referensi).trim().slice(0, REFERENSI_MAX), // apa adanya; normalisasi (mis. 'fb') urusan Acesio
+    keyword: String(l.keyword || '').slice(0, KEYWORD_MAX),
+    note: [
+      l.followUpNote ? `[Follow-up] ${l.followUpNote}` : '',
+      l.firstMessage ? `[Pesan Awal] ${l.firstMessage}` : '',
+    ].filter(Boolean).join('\n'),
+    data: l.data || {},
+    wa_lead_id: l.id,
+  };
+
+  acesioInflight.add(l.id);
+  const t0 = Date.now();
+  let out;
+  try {
+    const resp = await fetch(`${acesioUrl}/api/bot/incoming-leads`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': acesioKey, 'X-Correlation-ID': cid },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    const resJson = await resp.json().catch(() => ({}));
+    out = resp.ok
+      ? { ok: true, http: resp.status, acesioId: resJson.id, replayed: resJson.replayed === true }
+      : { ok: false, http: resp.status, kind: 'rejected', error: `HTTP ${resp.status}${resJson.error ? ': ' + String(resJson.error).slice(0, 200) : ''}` };
+  } catch (err) {
+    const timedOut = err?.name === 'TimeoutError' || err?.name === 'AbortError';
+    out = {
+      ok: false, http: 0, kind: timedOut ? 'timeout' : 'unreachable',
+      error: timedOut ? `timeout setelah ${timeoutMs} ms` : String(err?.cause?.code || err?.message || err).slice(0, 120),
+    };
+  } finally {
+    acesioInflight.delete(l.id);
+  }
+  const ms = Date.now() - t0;
+  const target = safeOrigin(acesioUrl);
+  // Log aman: tanpa API key, tanpa isi pesan/catatan; nomor disamarkan.
+  acesioLog({ cid, leadId: l.id, phone: maskPhone(l.phone), target, ok: out.ok, http: out.http, kind: out.kind || 'ok', ms, replayed: out.replayed === true, error: out.error });
+
+  if (!out.ok) {
+    // Data CRM tidak disentuh; hanya status percobaan dicatat. Status 'sent' dari pengiriman sebelumnya dipertahankan.
+    const patch = { acesioLastError: out.error, acesioLastAttemptAt: Date.now() };
+    if (l.acesioStatus !== 'sent') patch.acesioStatus = 'failed';
+    try { store.update(id, patch); } catch (e) { acesioLog({ cid, evt: 'status_save_failed', error: String(e?.message || e).slice(0, 120) }); }
+    ctx.audit('lead.send_to_acesio_failed', { id, cid, http: out.http, kind: out.kind });
+    const why = out.kind === 'rejected' ? `Acesio menolak data (${out.error})` // bukan 401/403 agar UI tidak mengira sesi habis
+      : out.kind === 'timeout' ? `Acesio tidak merespons: ${out.error}` : `Gagal menghubungi Acesio di ${target}: ${out.error}`;
+    return fail(502, `${why}. ID pelacakan: ${cid}`);
+  }
+  let updated = l;
+  let warning;
+  const at = Date.now();
+  // replayed:true = data sudah ada di Acesio dan tidak diperbarui: bukan pengiriman baru (acesioSentAt tidak diubah).
+  // Penanda acesioReplayed tidak dinyalakan bila lead ini memang sudah tercatat terkirim oleh CRM sebelumnya.
+  const done = out.replayed
+    ? { acesioStatus: 'sent', acesioReplayed: l.acesioStatus === 'sent' ? l.acesioReplayed === true : true }
+    : { acesioStatus: 'sent', acesioReplayed: false, acesioSentAt: at };
+  try {
+    updated = store.update(id, { ...done, acesioLastError: null, acesioLastAttemptAt: at }) || l;
+  } catch (e) {
+    // Acesio SUDAH menerima data. Jangan melapor gagal (memicu kirim ulang ganda); beri peringatan.
+    warning = 'Data diterima Acesio tetapi status pengiriman gagal disimpan di CRM.';
+    acesioLog({ cid, evt: 'status_save_failed', error: String(e?.message || e).slice(0, 120) });
+  }
+  ctx.audit('lead.send_to_acesio', { id, cid, phone: l.phone, name: l.name, acesioId: out.acesioId, http: out.http, ms, replayed: out.replayed === true });
+  return send(200, {
+    ok: true, cid, ...(out.replayed ? { replayed: true } : {}), ...(warning ? { warning } : {}), lead: detailView(updated),
+    message: out.replayed ? 'Sudah ada di Acesio (tidak diperbarui)' : 'Data customer berhasil dikirim ke Acesio',
+  });
+}
+
+/** Lead yang masuk antrean pengajuan: Hot Leads tahap Won yang belum tercatat terkirim. */
+function acesioQueue() {
+  const today = dayKey(Date.now(), getTz());
+  const items = store.all().filter((l) => acesioReadiness(l).eligible && l.acesioStatus !== 'sent').map((l) => {
+    const v = listItem(l, today);
+    return {
+      id: v.id, name: v.name || '', phone: v.phone || '', referensi: v.referensi || '', keyword: v.keyword || '', platform: v.platform || '',
+      acesioStatus: v.acesioStatus || null, acesioLastError: v.acesioLastError || null, acesioLastAttemptAt: v.acesioLastAttemptAt || null,
+      ready: v.acesioReadiness.ready, missing: v.acesioReadiness.missing.map((k) => MISSING_SHORT[k] || k),
+    };
+  }).sort((x, y) => Number(y.ready) - Number(x.ready) || String(x.name).localeCompare(String(y.name)));
+  const link = getAcesioLink();
+  return {
+    items, configured: !!link.key,
+    counts: { total: items.length, ready: items.filter((i) => i.ready).length, incomplete: items.filter((i) => !i.ready).length, failed: items.filter((i) => i.acesioStatus === 'failed').length },
+  };
+}
+
+const SUBMIT_ALL_MAX = 200;
+
 export async function handle(req, res, url, ctx) {
   const p = url.pathname;
   if (p !== '/api/leads' && !p.startsWith('/api/leads/')) return false;
@@ -359,6 +479,28 @@ export async function handle(req, res, url, ctx) {
       });
       ctx.audit('lead.create', { id: r.lead?.id, phone, existed: !!r.existed });
       return send(r.existed ? 200 : 201, { lead: detailView(r.lead), existed: !!r.existed });
+    }
+
+    // ----- pengajuan ke Acesio: antrean + ajukan semua -----
+    if (p === '/api/leads/acesio/queue') {
+      if (m !== 'GET') return notAllowed();
+      return send(200, acesioQueue());
+    }
+    if (p === '/api/leads/acesio/submit-all') {
+      if (m !== 'POST') return notAllowed();
+      if (!getAcesioLink().key) return fail(503, 'Integrasi Acesio belum dikonfigurasi: isi alamat dan kunci Acesio di Pengaturan (tab Integrasi).');
+      const todo = acesioQueue().items.filter((i) => i.ready).slice(0, SUBMIT_ALL_MAX);
+      const results = [];
+      for (const it of todo) { // berurutan: tidak membebani Acesio, dan galat satu lead tidak menghentikan yang lain
+        const cur = store.all().find((l) => l.id === it.id);
+        if (!cur) continue;
+        const r = await submitToAcesio(cur, ctx);
+        results.push({ id: it.id, name: it.name, ok: r.status === 200 && r.body.ok === true, replayed: r.body.replayed === true, error: r.status === 200 ? null : r.body.error });
+      }
+      const sent = results.filter((r) => r.ok && !r.replayed).length, replayed = results.filter((r) => r.replayed).length, failed = results.filter((r) => !r.ok).length;
+      const q = acesioQueue();
+      ctx.audit('lead.send_to_acesio_all', { total: results.length, sent, replayed, failed });
+      return send(200, { ok: failed === 0, total: results.length, sent, replayed, failed, skippedIncomplete: q.counts.incomplete, results, queue: q });
     }
 
     const mm = p.match(SUB_ROUTE);
@@ -534,97 +676,8 @@ export async function handle(req, res, url, ctx) {
     // ----- kirim ke acesio -----
     if (sub === 'send-to-acesio') {
       if (m !== 'POST') return notAllowed();
-      const l = norm(cur);
-      if (l.status !== 'Hot Leads') {
-        return fail(400, 'Hanya Hot Leads yang dapat dikirim ke Acesio');
-      }
-      if (l.hotStage !== 'Won') {
-        return fail(400, 'Tingkatan Hot Lead harus sudah mencapai tahap Won untuk dikirim ke Acesio');
-      }
-
-      const ready = acesioReadiness(l);
-      if (!ready.ready) {
-        const error = `Data customer belum lengkap untuk dikirim ke Acesio. ${ready.missing.map((k) => MISSING_TEXT[k]).join('. ')}.`;
-        return send(400, { error, missing: ready.missing });
-      }
-      const acesioUrl = String(process.env.ACESIO_URL || 'http://127.0.0.1:3000').trim().replace(/\/+$/, '');
-      const acesioKey = String(process.env.ACESIO_BOT_KEY || process.env.ACESIO_API_KEY || process.env.BOT_API_KEY || '').trim();
-      if (!acesioKey) return fail(503, 'Integrasi Acesio belum dikonfigurasi: ACESIO_BOT_KEY belum diisi di .env');
-      if (acesioInflight.has(l.id)) return fail(409, 'Pengiriman ke Acesio untuk lead ini masih berjalan. Tunggu hasilnya.');
-
-      const cid = randomUUID(); // correlation ID: dikirim ke Acesio, dicatat di log, audit, dan respons
-      const timeoutMs = Math.min(60000, Math.max(1000, Number(process.env.ACESIO_TIMEOUT_MS) || 10000));
-      const payload = {
-        name: String(l.name).trim(),
-        phone: canonPhone(l.phone) || String(l.phone).replace(/\D/g, ''),
-        platform: String(l.referensi).trim().slice(0, REFERENSI_MAX), // apa adanya; normalisasi (mis. 'fb') urusan Acesio
-        keyword: String(l.keyword || '').slice(0, KEYWORD_MAX),
-        note: [
-          l.followUpNote ? `[Follow-up] ${l.followUpNote}` : '',
-          l.firstMessage ? `[Pesan Awal] ${l.firstMessage}` : '',
-        ].filter(Boolean).join('\n'),
-        data: l.data || {},
-        wa_lead_id: l.id,
-      };
-
-      acesioInflight.add(l.id);
-      const t0 = Date.now();
-      let out;
-      try {
-        const resp = await fetch(`${acesioUrl}/api/bot/incoming-leads`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'X-API-Key': acesioKey, 'X-Correlation-ID': cid },
-          body: JSON.stringify(payload),
-          signal: AbortSignal.timeout(timeoutMs),
-        });
-        const resJson = await resp.json().catch(() => ({}));
-        out = resp.ok
-          ? { ok: true, http: resp.status, acesioId: resJson.id, replayed: resJson.replayed === true }
-          : { ok: false, http: resp.status, kind: 'rejected', error: `HTTP ${resp.status}${resJson.error ? ': ' + String(resJson.error).slice(0, 200) : ''}` };
-      } catch (err) {
-        const timedOut = err?.name === 'TimeoutError' || err?.name === 'AbortError';
-        out = {
-          ok: false, http: 0, kind: timedOut ? 'timeout' : 'unreachable',
-          error: timedOut ? `timeout setelah ${timeoutMs} ms` : String(err?.cause?.code || err?.message || err).slice(0, 120),
-        };
-      } finally {
-        acesioInflight.delete(l.id);
-      }
-      const ms = Date.now() - t0;
-      const target = safeOrigin(acesioUrl);
-      // Log aman: tanpa API key, tanpa isi pesan/catatan; nomor disamarkan.
-      acesioLog({ cid, leadId: l.id, phone: maskPhone(l.phone), target, ok: out.ok, http: out.http, kind: out.kind || 'ok', ms, replayed: out.replayed === true, error: out.error });
-
-      if (!out.ok) {
-        // Data CRM tidak disentuh; hanya status percobaan dicatat. Status 'sent' dari pengiriman sebelumnya dipertahankan.
-        const patch = { acesioLastError: out.error, acesioLastAttemptAt: Date.now() };
-        if (l.acesioStatus !== 'sent') patch.acesioStatus = 'failed';
-        try { store.update(id, patch); } catch (e) { acesioLog({ cid, evt: 'status_save_failed', error: String(e?.message || e).slice(0, 120) }); }
-        ctx.audit('lead.send_to_acesio_failed', { id, cid, http: out.http, kind: out.kind });
-        const why = out.kind === 'rejected' ? `Acesio menolak data (${out.error})` // bukan 401/403 agar UI tidak mengira sesi habis
-          : out.kind === 'timeout' ? `Acesio tidak merespons: ${out.error}` : `Gagal menghubungi Acesio di ${target}: ${out.error}`;
-        return fail(502, `${why}. ID pelacakan: ${cid}`);
-      }
-      let updated = l;
-      let warning;
-      const at = Date.now();
-      // replayed:true = data sudah ada di Acesio dan tidak diperbarui: bukan pengiriman baru (acesioSentAt tidak diubah).
-      // Penanda acesioReplayed tidak dinyalakan bila lead ini memang sudah tercatat terkirim oleh CRM sebelumnya.
-      const done = out.replayed
-        ? { acesioStatus: 'sent', acesioReplayed: l.acesioStatus === 'sent' ? l.acesioReplayed === true : true }
-        : { acesioStatus: 'sent', acesioReplayed: false, acesioSentAt: at };
-      try {
-        updated = store.update(id, { ...done, acesioLastError: null, acesioLastAttemptAt: at }) || l;
-      } catch (e) {
-        // Acesio SUDAH menerima data. Jangan melapor gagal (memicu kirim ulang ganda); beri peringatan.
-        warning = 'Data diterima Acesio tetapi status pengiriman gagal disimpan di CRM.';
-        acesioLog({ cid, evt: 'status_save_failed', error: String(e?.message || e).slice(0, 120) });
-      }
-      ctx.audit('lead.send_to_acesio', { id, cid, phone: l.phone, name: l.name, acesioId: out.acesioId, http: out.http, ms, replayed: out.replayed === true });
-      return send(200, {
-        ok: true, cid, ...(out.replayed ? { replayed: true } : {}), ...(warning ? { warning } : {}), lead: detailView(updated),
-        message: out.replayed ? 'Sudah ada di Acesio (tidak diperbarui)' : 'Data customer berhasil dikirim ke Acesio',
-      });
+      const r = await submitToAcesio(cur, ctx);
+      return send(r.status, r.body);
     }
 
     return false;

@@ -698,7 +698,7 @@ function startEvents() {
 }
 
 /* ====================================================================
-   Klien pengaturan: If-Match (versi), antrean simpan, konflik 409, riwayat, Undo
+   Klien pengaturan: If-Match (versi), antrean simpan, konflik 409. Hanya pengaturan terbaru yang dipakai (tanpa riwayat/pemulihan versi di dashboard).
    ==================================================================== */
 const SK = { cur: null, chain: Promise.resolve(), subs: new Set() };
 export class SettingsConflict extends Error {
@@ -707,7 +707,7 @@ export class SettingsConflict extends Error {
 export const getSettings = () => SK.cur;
 export const unwrapSettings = (r) => (r && typeof r === 'object' && r.settings && typeof r.settings === 'object' ? r.settings : r);
 
-/** Langganan perubahan cache pengaturan: fn(settings, source) dengan source 'save'|'restore'|'reload'. */
+/** Langganan perubahan cache pengaturan: fn(settings, source) dengan source 'save'|'reload'. */
 export function onSettingsChange(fn) { SK.subs.add(fn); return () => SK.subs.delete(fn); }
 function emitSettings(source) {
   for (const f of [...SK.subs]) { try { f(SK.cur, source); } catch (e) { console.error(e); } }
@@ -730,7 +730,7 @@ const enqueue = (job) => {
  * dihitung saat gilirannya terhadap data TERBARU; kembalikan null bila tidak ada yang perlu disimpan.
  * Konflik 409: dialog "Muat ulang?"; ditolak dengan SettingsConflict (e.conflict) bila pengguna tidak menimpa.
  */
-export function saveSettings(patchOrFn, { message = 'Tersimpan', undo = true } = {}) {
+export function saveSettings(patchOrFn, { message = 'Tersimpan' } = {}) {
   return enqueue(async () => {
     if (!SK.cur) await loadSettings();
     for (let attempt = 0; attempt < 2; attempt++) {
@@ -741,7 +741,7 @@ export function saveSettings(patchOrFn, { message = 'Tersimpan', undo = true } =
         const res = await send('/api/settings', patch, 'PUT', before != null ? { 'If-Match': String(before) } : {});
         SK.cur = unwrapSettings(res);
         emitSettings('save');
-        toast(message, false, before != null && undo ? { action: { label: 'Urungkan', fn: () => undoTo(before) } } : {});
+        toast(message);
         return SK.cur;
       } catch (err) {
         if (err.status !== 409) throw err;
@@ -756,51 +756,6 @@ export function saveSettings(patchOrFn, { message = 'Tersimpan', undo = true } =
     }
     throw new SettingsConflict();
   });
-}
-
-export function restoreSettings(version) {
-  return enqueue(async () => {
-    const res = await send('/api/settings/restore', { version });
-    const s = unwrapSettings(res);
-    if (s && Array.isArray(s.knowledge)) SK.cur = s; else await loadSettings();
-    emitSettings('restore');
-    return SK.cur;
-  });
-}
-async function undoTo(version) {
-  try { await restoreSettings(version); toast('Perubahan diurungkan'); } catch (e) { toast(e.message, true); }
-}
-
-/** Normalisasi respons /api/settings/history menjadi [{version, ts, by, summary}] terbaru dulu. */
-export function normHistory(d) {
-  const arr = Array.isArray(d) ? d : d?.history ?? d?.versions ?? d?.items ?? [];
-  return arr.map((h) => ({
-    version: h.version,
-    ts: h.updatedAt ?? h.ts ?? h.at ?? null,
-    by: h.updatedBy ?? h.by ?? h.user ?? '',
-    summary: Array.isArray(h.summary ?? h.changes) ? (h.summary ?? h.changes).join(', ') : String(h.summary ?? h.changes ?? h.note ?? ''),
-  })).filter((h) => h.version != null).sort((a, b) => b.version - a.version);
-}
-
-export async function openSettingsHistory() {
-  let items;
-  try { items = normHistory(await api('/api/settings/history')); } catch (e) { return toast(e.message, true); }
-  const curV = SK.cur?.version;
-  const d = openDialog({ title: 'Riwayat versi pengaturan', size: 'wide' });
-  d.body.innerHTML = `<p class="text-sm text-gray-600 mb-3">Pulihkan pengaturan ke versi sebelumnya. Memulihkan membuat versi baru, jadi riwayat tidak hilang.</p>
-    ${items.length ? `<ul class="history-list">${items.map((h) => `<li><div class="min-w-0"><div class="font-medium">Versi ${esc(h.version)}${h.version === curV ? ' <span class="tag tag-info">Versi aktif</span>' : ''}</div>
-      <div class="text-xs text-gray-600">${h.ts ? esc(fmtDate(h.ts)) : ''}${h.by ? ' &middot; oleh ' + esc(h.by) : ''}${h.summary ? ' &middot; ' + esc(h.summary) : ''}</div></div>
-      ${h.version === curV ? '' : `<button type="button" class="${BTN_LIGHT}" data-restore="${esc(h.version)}">Pulihkan</button>`}</li>`).join('')}</ul>` : '<p class="text-sm text-gray-600">Belum ada riwayat versi.</p>'}
-    <div class="dialog-actions"><button type="button" data-x class="${BTN_DARK}">Tutup</button></div>`;
-  d.body.querySelector('[data-x]').onclick = d.close;
-  d.body.onclick = async (e) => {
-    const b = e.target.closest('[data-restore]');
-    if (!b) return;
-    const v = Number(b.dataset.restore);
-    if (!(await confirmDialog('Pulihkan versi ' + v + '?', 'Pengaturan saat ini akan diganti dengan isi versi ' + v + '.', { okText: 'Pulihkan' }))) return;
-    try { await restoreSettings(v); toast('Versi ' + v + ' dipulihkan'); d.close(); } catch (err) { toast(err.message, true); }
-  };
-  (d.body.querySelector('[data-restore]') || d.body.querySelector('[data-x]')).focus();
 }
 
 /* ====================================================================
