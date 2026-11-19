@@ -6,6 +6,7 @@ import * as settingsStore from './settings.js';
 import { ingest } from './leads.js';
 import { emit } from './events.js';
 import { plan, setMode, applyReplyEffect, fill } from './bot-plan.js';
+import { agentCfg, shouldStart, begin as beginForm, step as formStep } from './crm-agent.js';
 
 const BACKOFF = [1000, 3000, 9000]; // jeda antar percobaan kirim
 const ATTEMPTS = 3;
@@ -83,6 +84,7 @@ export function makeRealDeps(send) {
     plan,
     ai,
     quota,
+    acesioForm: async (phone) => (await import('./acesio-form.js')).fetchForm(phone),
   };
 }
 
@@ -299,6 +301,23 @@ export async function processIncoming(msg, d) {
     };
     p = (d.plan || plan)(conv, { text: msg.text, caption: msg.caption, kind: msg.kind, ts: msg.ts }, S, now, ctx);
   }
+  // Agen CRM: lead Hot -> formulir data; jawaban formulir ditangani agen (bukan balasan biasa).
+  let agentX = null;
+  if (!alreadyReplied && d.acesioForm && agentCfg(S).enabled && conv.mode === 'bot' && !msg.fromPhone) {
+    try {
+      const lead0 = findLead(d, msg.phone, msg.lid) || res?.lead || null;
+      if (shouldStart(conv, lead0, S)) await beginForm(d, conv, lead0, now);
+      const x = formStep({ conv, msg, S, now });
+      if (x.consumed) {
+        agentX = x;
+        p = { ...p, replies: x.replies, attention: null, referensi: x.referensi || p.referensi };
+      } else if (conv.form?.stage === 'collecting') {
+        p = { ...p, replies: [...p.replies.filter((r) => !['question', 'reask', 'completion'].includes(r.kind)), ...(x.append ? x.replies : [])] };
+      }
+    } catch (e) {
+      console.error('[agen-crm] dilewati:', e?.name || 'galat'); // galat agen tidak boleh menghentikan balasan biasa
+    }
+  }
   if (p.referensi) message.referensi = String(p.referensi); // dipertahankan untuk percobaan ulang
   if (p.returnedToBot) {
     d.convs.addMessage(conv, 'system', `Admin tidak membalas lebih dari ${p.returnedToBot} menit. Bot aktif kembali untuk percakapan ini.`, now);
@@ -360,6 +379,12 @@ export async function processIncoming(msg, d) {
     }
   }
 
+  // Formulir lengkap dan penutup terkirim: minta admin menindaklanjuti DP.
+  if (agentX?.attention && conv.form?.stage === 'done') {
+    attention = { reason: agentX.attention };
+    setAttention(d, conv, agentX.attention, now);
+  }
+
   // Sinkron nama/data/referensi ke lead. lead.phone TIDAK pernah diisi dari teks pelanggan.
   let lead = findLead(d, msg.phone, msg.lid) || res?.lead || null;
   if (lead) {
@@ -375,6 +400,9 @@ export async function processIncoming(msg, d) {
     // Nama dari WhatsApp hanya mengisi nama yang kosong; tidak menimpa nama yang sudah ada atau hasil edit admin.
     const waNow = wa || cleanWaName(lead.waName);
     if (waNow && blankName(patch.name ?? lead.name)) patch.name = waNow;
+    // Formulir selesai: nama dari formulir (customer baru) atau dari Acesio (customer lama) menggantikan nama kontak WA.
+    // Nama kontak WA tetap tersimpan di waName sebagai cadangan.
+    if (conv.form?.stage === 'done' && agentX?.patch?.name) patch.name = agentX.patch.name;
     if (Object.keys(patch).length) {
       d.leads.update(lead.id, patch);
       lead = findLead(d, msg.phone, msg.lid) || lead;

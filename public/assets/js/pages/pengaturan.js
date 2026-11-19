@@ -8,9 +8,9 @@ import {
 } from '../lib.js';
 
 let stopPoll = null, stopUsage = null, off = null, offEv = null, lastQr = null, canEdit = true, root, brandInfo = null;
-const TAB_LIST = [['umum', 'Umum'], ['whatsapp', 'WhatsApp'], ['ai', 'Balasan AI'], ['integrasi', 'Integrasi'], ['notif', 'Notifikasi & data']];
+const TAB_LIST = [['umum', 'Umum'], ['whatsapp', 'WhatsApp'], ['ai', 'Balasan AI'], ['agen', 'Agen CRM'], ['integrasi', 'Integrasi'], ['notif', 'Notifikasi & data']];
 const TAB_KEY = 'amn-pengaturan-tab';
-const SAVE_TABS = ['umum', 'whatsapp', 'notif']; // tab yang memakai tombol Simpan pengaturan
+const SAVE_TABS = ['umum', 'whatsapp', 'notif', 'agen']; // tab yang memakai tombol Simpan pengaturan
 let tab = 'umum';
 let acesio = null, keyState = null, keyEdit = false, usageState = { data: null, error: '' };
 
@@ -68,6 +68,20 @@ export function buildSettingsPatch(v, cur = {}) {
       const old = (Array.isArray(cur.requiredFields) ? cur.requiredFields : []).find((f) => f?.id === 'referensi');
       p.requiredFields = [{ id: 'referensi', type: 'text', enabled: old?.enabled !== false, question: q }]; // tepat satu butir
     }
+  }
+  if ('crmAgentForm' in v) { // tab Agen CRM
+    const clip = (k, max) => String(v[k] ?? '').trim().slice(0, max);
+    const delays = [];
+    for (const [i, k] of ['crmDelay1', 'crmDelay2'].entries()) {
+      const n = Number(String(v[k] ?? '').trim());
+      if (!Number.isInteger(n) || n < 5 || n > 10080) errors.push({ field: k, msg: `Jeda follow up ke-${i + 1} harus bilangan bulat 5-10080 menit.` });
+      else delays.push(n);
+    }
+    p.crmAgent = {
+      enabled: v.crmEnabled === 'on',
+      formIntro: clip('crmFormIntro', 1000), doneMessage: clip('crmDoneMessage', 1000),
+      followUpDelaysMinutes: delays, followUpMessages: [clip('crmFollow1', 1000), clip('crmFollow2', 1000)],
+    };
   }
   return { patch: p, errors };
 }
@@ -357,6 +371,7 @@ function bindTabs() {
 function render() {
   const S = getSettings(), N = S.notify || {};
   const A = { ...AI_DEFAULTS, ...(S.ai && typeof S.ai === 'object' ? S.ai : {}) };
+  const A_CRM = { enabled: false, formIntro: '', doneMessage: '', followUpDelaysMinutes: [180, 1440], followUpMessages: ['', ''], ...(S.crmAgent && typeof S.crmAgent === 'object' ? S.crmAgent : {}) };
   const dis = canEdit ? '' : 'disabled';
   const phoneFmt = PHONE_FORMATS.includes(S.phoneFormat) ? S.phoneFormat : 'digits';
   const num = (name, label, hint, min, max) => field(label, `<input name="${name}" type="number" min="${min}" max="${max}" step="1" class="${INP}" value="${esc(S[name] ?? N[name] ?? '')}" ${dis}>`, hint);
@@ -439,6 +454,20 @@ function render() {
         ${num('retentionDays', 'Hapus percakapan lama setelah (hari)', '0 = dimatikan (data disimpan selamanya). Bila diisi, percakapan yang lebih lama akan dihapus PERMANEN secara berkala.', 0, 3650)}
       </fieldset>
 
+    </div>
+    <div data-panel="agen" class="card space-y-6" hidden>
+      <div><h2 class="font-bold text-lg text-gray-900">Agen CRM</h2><p class="text-sm text-gray-600">Saat lead sudah Hot, bot tetap memegang percakapan dan meminta customer mengisi formulir data. Setelah lengkap, chat dialihkan ke admin untuk pelunasan DP. Berlaku untuk Baileys dan Convia.</p></div>
+      <input type="hidden" name="crmAgentForm" value="1">
+      ${chk('crmEnabled', A_CRM.enabled, 'Aktifkan agen CRM', 'Kolom formulir mengikuti data Acesio (Nama, Jenis kelamin, Tanggal lahir, Pekerjaan, Domisili, dan sumber referensi). Customer lama hanya diminta kolom yang masih kosong. No RM dan SOAP tidak pernah ditanyakan.', dis)}
+      ${field('Pengantar formulir', `<textarea name="crmFormIntro" rows="2" class="${INP}" maxlength="1000" ${dis}>${esc(A_CRM.formIntro)}</textarea>`, 'Teks di atas daftar kolom yang dikirim ke customer')}
+      ${field('Pesan setelah formulir lengkap', `<textarea name="crmDoneMessage" rows="2" class="${INP}" maxlength="1000" ${dis}>${esc(A_CRM.doneMessage)}</textarea>`, 'Dikirim saat chat dialihkan ke admin. {admin} = nama admin')}
+      <fieldset class="space-y-4 border-t border-gray-100 pt-4"><legend class="font-semibold text-brand-800 mb-2">Follow up DP (maksimal 2 kali)</legend>
+        <p class="text-xs text-gray-600">Dikirim bila formulir sudah lengkap tetapi tahap Hot Lead belum Won. Berhenti otomatis bila DP lunas (Won), Lost, atau customer membalas. Di Convia, pesan hanya dikirim dalam 24 jam sejak pesan terakhir customer; di luar itu chat ditandai perlu perhatian.</p>
+        ${field('Follow up 1: berapa menit setelah formulir lengkap', `<input name="crmDelay1" type="number" min="5" max="10080" class="${INP}" value="${esc(A_CRM.followUpDelaysMinutes[0])}" ${dis}>`)}
+        ${field('Isi follow up 1', `<textarea name="crmFollow1" rows="2" class="${INP}" maxlength="1000" ${dis}>${esc(A_CRM.followUpMessages[0])}</textarea>`, '{nama} = nama customer')}
+        ${field('Follow up 2: berapa menit setelah formulir lengkap', `<input name="crmDelay2" type="number" min="5" max="10080" class="${INP}" value="${esc(A_CRM.followUpDelaysMinutes[1])}" ${dis}>`)}
+        ${field('Isi follow up 2', `<textarea name="crmFollow2" rows="2" class="${INP}" maxlength="1000" ${dis}>${esc(A_CRM.followUpMessages[1])}</textarea>`)}
+      </fieldset>
     </div>
     <div id="s-save" class="space-y-3 mt-6">
       <div id="s-err" class="form-error" role="alert" hidden></div>

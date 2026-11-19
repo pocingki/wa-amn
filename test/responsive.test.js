@@ -73,12 +73,12 @@ test('admin: Integrasi ada sebagai tab di Pengaturan (bukan menu sendiri); sub m
     // sub menu: tepat satu bagian tampil pada satu waktu; Integrasi memuat Acesio dan Booking Live
     const shown = () => page.evaluate(() => [...document.querySelectorAll('#view [data-panel]')].filter((e) => !e.hidden).map((e) => e.dataset.panel));
     const tabs = await page.locator('#view [role=tab]').evaluateAll((a) => a.map((x) => x.dataset.tab));
-    assert.deepEqual(tabs, ['umum', 'whatsapp', 'ai', 'integrasi', 'notif']);
+    assert.deepEqual(tabs, ['umum', 'whatsapp', 'ai', 'agen', 'integrasi', 'notif']);
     for (const k of tabs) {
       await page.locator(`#view [data-tab="${k}"]`).click();
       assert.deepEqual(await shown(), [k], `tab ${k}`);
       assert.equal(await page.locator(`#view [data-tab="${k}"]`).getAttribute('aria-selected'), 'true');
-      assert.equal(await page.locator('#s-save').isVisible(), ['umum', 'whatsapp', 'notif'].includes(k), `tombol simpan di tab ${k}`);
+      assert.equal(await page.locator('#s-save').isVisible(), ['umum', 'whatsapp', 'notif', 'agen'].includes(k), `tombol simpan di tab ${k}`);
     }
     await page.locator('#view [data-tab="integrasi"]').click();
     await page.waitForSelector('#view >> text=Hubungkan Booking Live');
@@ -104,7 +104,7 @@ for (const w of SIZES) {
     }
     await page.goto(`${srv.base}/#/pengaturan`);
     await page.waitForSelector('#view [role=tab]');
-    for (const k of ['umum', 'whatsapp', 'ai', 'integrasi', 'notif']) {
+    for (const k of ['umum', 'whatsapp', 'ai', 'agen', 'integrasi', 'notif']) {
       await page.locator(`#view [data-tab="${k}"]`).click();
       await page.waitForTimeout(150);
       const over = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);

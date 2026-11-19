@@ -428,9 +428,28 @@ process.on('unhandledRejection', (err) => {
 
 setInterval(() => auth.cleanupSessions(), 10 * 60_000).unref();
 
+// Follow up DP otomatis (agen CRM). Mati bila agen CRM tidak diaktifkan di Pengaturan.
+let followUps = null;
+async function startFollowUps() {
+  if (process.env.DISABLE_WA === '1' || !waMod?.sendText) return;
+  try {
+    const [{ createRunner }, convs, leads, settings, events] = await Promise.all([
+      import('./src/crm-followup.js'), import('./src/conversations.js'), import('./src/store.js'),
+      import('./src/settings.js'), import('./src/events.js'),
+    ]);
+    followUps = createRunner({
+      convs, getSettings: settings.get, send: (jid, text) => waMod.sendText(jid, text), emit: events.emit,
+      findLead: (c) => (c.phone && leads.findByPhone(c.phone)) || (c.lid && leads.findByLid?.(c.lid)) || null,
+      log: (...a) => console.warn('[follow-up]', ...a),
+    });
+    followUps.start();
+  } catch (e) { console.error('[follow-up] tidak aktif:', e?.name || 'galat'); }
+}
+
 server.listen(PORT, BIND_HOST, () => {
   const shown = BIND_HOST === '0.0.0.0' || BIND_HOST === '::' ? '127.0.0.1' : BIND_HOST;
   console.log(`Dashboard jalan di http://${shown}:${PORT}${process.env.CLIENT_ID ? ` (client: ${process.env.CLIENT_ID})` : ''} (mendengarkan ${BIND_HOST})`);
   waMod?.start?.().catch(console.error);
   connect.start();
+  startFollowUps();
 });

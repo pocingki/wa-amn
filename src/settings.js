@@ -4,6 +4,7 @@
 import { randomBytes } from 'node:crypto';
 import { load, save } from './jsonfile.js';
 import { hasAiKey } from './ai-secret.js';
+import { AGENT_DEFAULTS } from './crm-agent.js';
 import { normalizeHex, checkBase } from '../public/assets/js/brand-color.js';
 
 const OPENING_LAMA = 'Halo {nama}, selamat datang. Saya {bot}, asisten virtual yang membantu {admin}. Ada yang bisa kami bantu?';
@@ -69,6 +70,8 @@ export const DEFAULTS = {
     quotaExhaustedMessage: 'Terima kasih, pesan Anda kami teruskan ke admin.',
     errorMessage: '',
   },
+  // Agen CRM: formulir data saat lead Hot + follow up DP (maks 2). Lihat src/crm-agent.js.
+  crmAgent: structuredClone(AGENT_DEFAULTS),
   // Basis pengetahuan untuk AI: [{ id, title, content, enabled }] (batas di KNOWLEDGE_LIMITS).
   knowledge: [],
   // Hanya satu butir: pertanyaan referensi. Field lama (nama, nomor, dll.) dimigrasikan keluar; data lead tidak dihapus.
@@ -259,6 +262,22 @@ function cleanRequired(list, base) {
   }];
 }
 
+// ---- agen CRM ----
+function cleanAgent(p, base) {
+  const b = { ...AGENT_DEFAULTS, ...(base || {}) };
+  const x = p && typeof p === 'object' ? p : {};
+  const o = { ...b };
+  if ('enabled' in x) o.enabled = !!x.enabled;
+  for (const k of ['formIntro', 'doneMessage']) if (k in x) o[k] = str(x[k], 1000) || AGENT_DEFAULTS[k];
+  if (Array.isArray(x.followUpDelaysMinutes)) {
+    o.followUpDelaysMinutes = [0, 1].map((i) => clampInt(x.followUpDelaysMinutes[i], 5, 10080, AGENT_DEFAULTS.followUpDelaysMinutes[i]));
+  }
+  if (Array.isArray(x.followUpMessages)) {
+    o.followUpMessages = [0, 1].map((i) => str(x.followUpMessages[i], 1000) || AGENT_DEFAULTS.followUpMessages[i]);
+  }
+  return o;
+}
+
 // ---- pembersihan input ----
 function clean(p, base) {
   const o = {};
@@ -305,6 +324,7 @@ function clean(p, base) {
     o.notify = x;
   }
   if (p.ai && typeof p.ai === 'object' && !Array.isArray(p.ai)) o.ai = cleanAi(p.ai, base.ai, true);
+  if (p.crmAgent && typeof p.crmAgent === 'object' && !Array.isArray(p.crmAgent)) o.crmAgent = cleanAgent(p.crmAgent, base.crmAgent);
   if ('knowledge' in p) {
     if (!Array.isArray(p.knowledge)) throw err('VALIDATION', 'Basis pengetahuan harus berupa daftar entri.');
     o.knowledge = cleanKnowledge(p.knowledge, true);
@@ -374,6 +394,7 @@ function normalize(saved) {
   delete s.slangMap;
   s.notify = { ...DEFAULTS.notify, ...(saved.notify && typeof saved.notify === 'object' ? saved.notify : {}) };
   s.ai = cleanAi(saved.ai, DEFAULTS.ai, false);
+  s.crmAgent = cleanAgent(saved.crmAgent, DEFAULTS.crmAgent);
   s.knowledge = cleanKnowledge(saved.knowledge, false);
   s.greetingWords = Array.isArray(saved.greetingWords) ? cleanGreetingWords(saved.greetingWords) : [...DEFAULTS.greetingWords];
   s.phoneFormat = PHONE_FORMATS.includes(saved.phoneFormat) ? saved.phoneFormat : DEFAULTS.phoneFormat;
