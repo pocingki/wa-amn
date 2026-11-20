@@ -34,7 +34,7 @@ const S = {
   botEnabled: true, botName: 'Sari', adminName: 'Dewi', openingMessage: 'Halo', fallbackMessage: '', handoverMessage: 'Dilanjutkan Dewi',
   completionMessage: 'Terima kasih', botDurationMinutes: 0, staleMinutes: 10, fallbackCooldownMinutes: 30, autoTakeoverOnPhoneReply: true,
   slangMap: {}, intents: [], requiredFields: [],
-  crmAgent: { ...AGENT_DEFAULTS, enabled: true },
+  crmAgent: { ...AGENT_DEFAULTS, enabled: true, askBooking: false },
 };
 function mk(form) {
   const st = new Map(), sent = [], leads = [{ id: 'L1', phone: '6281', name: 'Nama WA', waName: 'Nama WA', status: 'Hot Leads', hotStage: 'Follow Up', data: {} }];
@@ -149,9 +149,9 @@ test('Convia: lewat 24 jam dari pesan customer -> tidak dikirim, ditandai', () =
 test('Pengaturan: patch Agen CRM valid dan menolak jeda tidak masuk akal', async () => {
   const { buildSettingsPatch } = await import('../public/assets/js/pages/pengaturan.js');
   const base = { brandName: 'A', botName: 'B', adminName: 'C', retentionDays: '0', botDurationMinutes: '0', adminAutoReturnMinutes: '0', staleMinutes: '10', fallbackCooldownMinutes: '30', sendRateLimitPerMinute: '20', attentionMinutes: '30' };
-  const ok = buildSettingsPatch({ ...base, crmAgentForm: '1', crmEnabled: 'on', crmFormIntro: 'Isi ya', crmDoneMessage: 'Selesai', crmDelay1: '180', crmDelay2: '1440', crmFollow1: 'f1', crmFollow2: 'f2' }, {});
+  const ok = buildSettingsPatch({ ...base, crmAgentForm: '1', crmEnabled: 'on', crmAskBooking: '', crmAutoSubmit: '', crmFormIntro: 'Isi ya', crmDoneMessage: 'Selesai', crmDelay1: '180', crmDelay2: '1440', crmFollow1: 'f1', crmFollow2: 'f2' }, {});
   assert.deepEqual(ok.errors, []);
-  assert.deepEqual(ok.patch.crmAgent, { enabled: true, formIntro: 'Isi ya', doneMessage: 'Selesai', followUpDelaysMinutes: [180, 1440], followUpMessages: ['f1', 'f2'] });
+  assert.deepEqual(ok.patch.crmAgent, { enabled: true, askBooking: false, autoSubmit: false, formIntro: 'Isi ya', doneMessage: 'Selesai', followUpDelaysMinutes: [180, 1440], followUpMessages: ['f1', 'f2'] });
   const bad = buildSettingsPatch({ ...base, crmAgentForm: '1', crmDelay1: '1', crmDelay2: 'x' }, {});
   assert.equal(bad.errors.filter((e) => /^crmDelay/.test(e.field)).length, 2);
   assert.equal('crmAgent' in buildSettingsPatch(base, {}).patch, false, 'form lain tidak menyentuh agen');

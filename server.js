@@ -446,10 +446,20 @@ async function startFollowUps() {
   } catch (e) { console.error('[follow-up] tidak aktif:', e?.name || 'galat'); }
 }
 
+// Ajukan ulang otomatis + sinkron keputusan Acesio (terima/tolak). Tidak bergantung pada koneksi WhatsApp.
+async function startAcesioSync() {
+  if (process.env.NODE_ENV === 'test') return;
+  try {
+    const [{ createSync }, crmApi, acesioBooking] = await Promise.all([import('./src/acesio-sync.js'), import('./src/api/crm.js'), import('./src/acesio-booking.js')]);
+    createSync({ ...crmApi.syncDeps(), statuses: (ids) => acesioBooking.fetchStatuses(ids), log: (...a) => console.warn('[acesio-sync]', ...a) }).start();
+  } catch (e) { console.error('[acesio-sync] tidak aktif:', e?.name || 'galat'); }
+}
+
 server.listen(PORT, BIND_HOST, () => {
   const shown = BIND_HOST === '0.0.0.0' || BIND_HOST === '::' ? '127.0.0.1' : BIND_HOST;
   console.log(`Dashboard jalan di http://${shown}:${PORT}${process.env.CLIENT_ID ? ` (client: ${process.env.CLIENT_ID})` : ''} (mendengarkan ${BIND_HOST})`);
   waMod?.start?.().catch(console.error);
   connect.start();
   startFollowUps();
+  startAcesioSync();
 });

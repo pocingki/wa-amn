@@ -730,6 +730,7 @@ test('[MOCK] Acesio: kesiapan data, payload (name, phone kanonik, platform=refer
   assert.equal(no.status, 400);
   assert.equal(acesio.state.requests.length, 0, 'Acesio tidak disentuh');
 
+  await setSettings({ crmAgent: { autoSubmit: false } }); // jalur manual diuji di sini; jalur otomatis diuji di acesio-auto.test.js
   const p = await c.patch(`/api/leads/${lead.id}`, { status: 'Hot Leads', hotStage: 'Won' });
   assert.equal(p.status, 200, p.text);
   const d1 = (await c.get(`/api/leads/${lead.id}`)).json;

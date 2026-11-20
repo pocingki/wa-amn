@@ -78,7 +78,7 @@ export function buildSettingsPatch(v, cur = {}) {
       else delays.push(n);
     }
     p.crmAgent = {
-      enabled: v.crmEnabled === 'on',
+      enabled: v.crmEnabled === 'on', askBooking: v.crmAskBooking === 'on', autoSubmit: v.crmAutoSubmit === 'on',
       formIntro: clip('crmFormIntro', 1000), doneMessage: clip('crmDoneMessage', 1000),
       followUpDelaysMinutes: delays, followUpMessages: [clip('crmFollow1', 1000), clip('crmFollow2', 1000)],
     };
@@ -371,7 +371,7 @@ function bindTabs() {
 function render() {
   const S = getSettings(), N = S.notify || {};
   const A = { ...AI_DEFAULTS, ...(S.ai && typeof S.ai === 'object' ? S.ai : {}) };
-  const A_CRM = { enabled: false, formIntro: '', doneMessage: '', followUpDelaysMinutes: [180, 1440], followUpMessages: ['', ''], ...(S.crmAgent && typeof S.crmAgent === 'object' ? S.crmAgent : {}) };
+  const A_CRM = { enabled: false, askBooking: true, autoSubmit: true, formIntro: '', doneMessage: '', followUpDelaysMinutes: [180, 1440], followUpMessages: ['', ''], ...(S.crmAgent && typeof S.crmAgent === 'object' ? S.crmAgent : {}) };
   const dis = canEdit ? '' : 'disabled';
   const phoneFmt = PHONE_FORMATS.includes(S.phoneFormat) ? S.phoneFormat : 'digits';
   const num = (name, label, hint, min, max) => field(label, `<input name="${name}" type="number" min="${min}" max="${max}" step="1" class="${INP}" value="${esc(S[name] ?? N[name] ?? '')}" ${dis}>`, hint);
@@ -459,6 +459,8 @@ function render() {
       <div><h2 class="font-bold text-lg text-gray-900">Agen CRM</h2><p class="text-sm text-gray-600">Saat lead sudah Hot, bot tetap memegang percakapan dan meminta customer mengisi formulir data. Setelah lengkap, chat dialihkan ke admin untuk pelunasan DP. Berlaku untuk Baileys dan Convia.</p></div>
       <input type="hidden" name="crmAgentForm" value="1">
       ${chk('crmEnabled', A_CRM.enabled, 'Aktifkan agen CRM', 'Kolom formulir mengikuti data Acesio (Nama, Jenis kelamin, Tanggal lahir, Pekerjaan, Domisili, dan sumber referensi). Customer lama hanya diminta kolom yang masih kosong. No RM dan SOAP tidak pernah ditanyakan.', dis)}
+      ${chk('crmAskBooking', A_CRM.askBooking, 'Tanyakan booking di formulir', 'Customer diminta mengisi layanan, tanggal, dan jam. Jam dicek ke jadwal Acesio; yang penuh ditolak dengan usulan jam lain. Admin masih bisa mengoreksi di detail lead.', dis)}
+      ${chk('crmAutoSubmit', A_CRM.autoSubmit, 'Ajukan otomatis ke Acesio saat DP lunas', 'Saat admin mengubah tahap lead menjadi Won, data langsung diajukan ke Acesio. Bila gagal, percakapan ditandai perlu perhatian dan dicoba ulang otomatis. Tombol Ajukan manual tetap ada.', dis)}
       ${field('Pengantar formulir', `<textarea name="crmFormIntro" rows="2" class="${INP}" maxlength="1000" ${dis}>${esc(A_CRM.formIntro)}</textarea>`, 'Teks di atas daftar kolom yang dikirim ke customer')}
       ${field('Pesan setelah formulir lengkap', `<textarea name="crmDoneMessage" rows="2" class="${INP}" maxlength="1000" ${dis}>${esc(A_CRM.doneMessage)}</textarea>`, 'Dikirim saat chat dialihkan ke admin. {admin} = nama admin')}
       <fieldset class="space-y-4 border-t border-gray-100 pt-4"><legend class="font-semibold text-brand-800 mb-2">Follow up DP (maksimal 2 kali)</legend>

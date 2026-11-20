@@ -6,7 +6,7 @@ import * as settingsStore from './settings.js';
 import { ingest } from './leads.js';
 import { emit } from './events.js';
 import { plan, setMode, applyReplyEffect, fill } from './bot-plan.js';
-import { agentCfg, shouldStart, begin as beginForm, step as formStep } from './crm-agent.js';
+import { agentCfg, shouldStart, begin as beginForm, step as formStep, checkSlots } from './crm-agent.js';
 
 const BACKOFF = [1000, 3000, 9000]; // jeda antar percobaan kirim
 const ATTEMPTS = 3;
@@ -85,6 +85,8 @@ export function makeRealDeps(send) {
     ai,
     quota,
     acesioForm: async (phone) => (await import('./acesio-form.js')).fetchForm(phone),
+    acesioServices: async () => (await import('./acesio-booking.js')).fetchServices(),
+    acesioSlots: async (day) => (await import('./acesio-booking.js')).fetchSlots(day),
   };
 }
 
@@ -307,7 +309,8 @@ export async function processIncoming(msg, d) {
     try {
       const lead0 = findLead(d, msg.phone, msg.lid) || res?.lead || null;
       if (shouldStart(conv, lead0, S)) await beginForm(d, conv, lead0, now);
-      const x = formStep({ conv, msg, S, now });
+      const slots = await checkSlots(d, { conv, msg, now });
+      const x = formStep({ conv, msg, S, now, slots });
       if (x.consumed) {
         agentX = x;
         p = { ...p, replies: x.replies, attention: null, referensi: x.referensi || p.referensi };

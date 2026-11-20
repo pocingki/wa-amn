@@ -8,6 +8,9 @@ import * as C from '../conversations.js';
 import * as L from '../leads.js';
 import * as settings from '../settings.js';
 import { getLink as getAcesioLink } from '../acesio-link.js';
+import * as events from '../events.js';
+import { agentCfg } from '../crm-agent.js';
+import { parseDay, parseTime, todayYmd } from '../crm-form.js';
 
 const DEFAULT_TZ = 'Asia/Jakarta';
 const SORTS = ['createdAt', 'lastContactAt', 'name', 'status', 'platform'];
@@ -383,6 +386,47 @@ async function submitToAcesio(cur, ctx) {
   });
 }
 
+/** Tandai percakapan lead "perlu perhatian" dengan alasan. Tidak pernah melempar galat. */
+export function flagLead(lead, reason) {
+  try {
+    const conv = lead?.phone ? C.get(lead.phone) : null;
+    if (!conv) return;
+    conv.needsAttention = true; conv.attentionReason = reason; conv.attentionAt = Date.now();
+    C.save(conv);
+    events.emit('conversation:attention', { phone: conv.phone, reason });
+  } catch { /* abaikan */ }
+}
+
+/**
+ * Ajukan otomatis ke Acesio saat DP lunas (Won). Gagal/belum lengkap -> perlu perhatian; dicoba ulang oleh acesio-sync.
+ * Tombol manual tetap tersedia sebagai cadangan.
+ */
+export async function autoSubmitLead(id, audit = () => {}) {
+  const cur = store.all().find((l) => l.id === id);
+  if (!cur || cur.acesioStatus === 'sent') return null;
+  let A; try { A = agentCfg(settings.get()); } catch { return null; }
+  if (!A.autoSubmit) return null;
+  const rd = acesioReadiness(norm(cur));
+  if (!rd.eligible) return null;
+  store.update(id, { acesioAuto: true, acesioAutoTries: (cur.acesioAutoTries || 0) + 1 });
+  if (!rd.ready) {
+    flagLead(cur, `Pengajuan otomatis ke Acesio tertunda: ${rd.missing.map((k) => MISSING_SHORT[k] || k).join(', ')} belum lengkap. Lengkapi lalu ajukan.`);
+    return { status: 400, body: { missing: rd.missing } };
+  }
+  const r = await submitToAcesio(store.all().find((l) => l.id === id) || cur, { audit });
+  if (r.status !== 200) flagLead(cur, `Pengajuan otomatis ke Acesio gagal: ${r.body?.error || 'tidak diketahui'}. Dicoba ulang otomatis; atau ajukan manual.`);
+  return r;
+}
+
+/** Ketergantungan untuk acesio-sync (dipasang di server.js). */
+export const syncDeps = () => ({
+  leads: () => store.all(),
+  submit: (id) => autoSubmitLead(id),
+  update: (id, patch) => store.update(id, patch),
+  flag: flagLead,
+  enabled: () => !!getAcesioLink().key,
+});
+
 /** Lead yang masuk antrean pengajuan: Hot Leads tahap Won yang belum tercatat terkirim. */
 function acesioQueue() {
   const today = dayKey(Date.now(), getTz());
@@ -549,6 +593,35 @@ export async function handle(req, res, url, ctx) {
           if (store.all().some((x) => x.id !== id && x.phone === ph)) return fail(409, 'Nomor ini sudah dipakai lead lain');
           patch.phone = ph; fields.push('phone');
         }
+        if ('booking' in b) {
+          const bk = b.booking;
+          if (!isObj(bk)) return fail(400, 'Field booking harus berupa objek');
+          const data = { ...(isObj(cur.data) ? cur.data : {}) };
+          if ('day' in bk) {
+            const raw = String(bk.day ?? '').trim();
+            if (!raw) delete data.booking_day;
+            else {
+              const d = parseDay(raw, now);
+              if (!d) return fail(400, 'Tanggal booking tidak valid (contoh 2026-11-29)');
+              if (d < todayYmd(now)) return fail(400, 'Tanggal booking sudah lewat');
+              data.booking_day = d;
+            }
+          }
+          if ('time' in bk) {
+            const raw = String(bk.time ?? '').trim();
+            if (!raw) delete data.booking_time;
+            else {
+              const t = parseTime(raw);
+              if (!t) return fail(400, 'Jam booking tidak valid (contoh 14:00)');
+              data.booking_time = t;
+            }
+          }
+          if ('services' in bk) {
+            const raw = (Array.isArray(bk.services) ? bk.services.join(', ') : String(bk.services ?? '')).replace(/\s+/g, ' ').trim().slice(0, 200);
+            if (!raw) delete data.booking_services; else data.booking_services = raw;
+          }
+          patch.data = data; fields.push('booking');
+        }
         const reset = truthy(b.resetAuto), confirmHot = truthy(b.confirmHot);
         if (reset && confirmHot) return fail(400, 'resetAuto dan confirmHot tidak bisa dipakai bersamaan');
 
@@ -594,8 +667,10 @@ export async function handle(req, res, url, ctx) {
           }
         }
         if (!fields.length) return fail(400, 'Tidak ada field yang bisa diubah');
+        const wasWon = cur.hotStage === 'Won'; // cur adalah objek yang sama dengan lead di store: baca sebelum update
         const lead = store.update(id, patch);
         ctx.audit('lead.update', { id, fields });
+        if (patch.hotStage === 'Won' && !wasWon) setImmediate(() => autoSubmitLead(id, ctx.audit).catch(() => {})); // DP lunas -> ajukan otomatis
         return send(200, { lead: detailView(lead) });
       }
       return notAllowed();

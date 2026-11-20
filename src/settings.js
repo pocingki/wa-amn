@@ -268,6 +268,7 @@ function cleanAgent(p, base) {
   const x = p && typeof p === 'object' ? p : {};
   const o = { ...b };
   if ('enabled' in x) o.enabled = !!x.enabled;
+  for (const k of ['askBooking', 'autoSubmit']) if (k in x) o[k] = !!x[k];
   for (const k of ['formIntro', 'doneMessage']) if (k in x) o[k] = str(x[k], 1000) || AGENT_DEFAULTS[k];
   if (Array.isArray(x.followUpDelaysMinutes)) {
     o.followUpDelaysMinutes = [0, 1].map((i) => clampInt(x.followUpDelaysMinutes[i], 5, 10080, AGENT_DEFAULTS.followUpDelaysMinutes[i]));

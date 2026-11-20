@@ -528,12 +528,25 @@ function acesioPanel(l) {
   } else if (l.acesioStatus === 'failed') {
     status = `Gagal diajukan${l.acesioLastError ? ': ' + l.acesioLastError : '.'}`;
   }
+  if (l.acesioStatus === 'sent' && l.acesioDecision === 'accepted') {
+    const sc = l.acesioSchedule;
+    status = `Diterima admin Acesio${sc ? `, jadwal ${sc.day} ${sc.start_time}${sc.worker ? ' dengan ' + sc.worker : ''}` : ' (tanpa jadwal)'}.`;
+  } else if (l.acesioDecision === 'rejected') {
+    status = `Ditolak admin Acesio${l.acesioRejectReason ? ': ' + l.acesioRejectReason : '.'} Perbaiki data lalu hubungi customer.`;
+  }
+  const bd = l.data || {};
+  const bookingBox = `<fieldset class="border border-emerald-200 rounded-lg p-2 space-y-2 bg-white"><legend class="text-xs font-bold text-emerald-900 px-1">Booking (bisa dikoreksi sebelum DP lunas)</legend>
+      <input name="booking_services" maxlength="200" class="${INP}" aria-label="Layanan" placeholder="Layanan, pisahkan dengan koma" value="${esc(bd.booking_services || '')}">
+      <div class="flex gap-2"><input type="date" name="booking_day" class="${INP}" aria-label="Tanggal booking" value="${esc(bd.booking_day || '')}"><input type="time" name="booking_time" class="${INP}" aria-label="Jam booking" value="${esc(bd.booking_time || '')}"></div>
+    </fieldset>`;
   const hint = !rd.eligible ? 'Tombol aktif setelah tahap Hot Lead mencapai Won.'
     : rd.missing.length ? `Lengkapi dulu: ${rd.missing.map((k) => MISSING_LABEL[k] || k).join(', ')}.` : '';
   return `<div class="bg-emerald-50 border border-emerald-200 rounded-lg p-3 space-y-2" id="acesio-box">
     <p class="text-sm font-bold text-emerald-900">Pengajuan ke Acesio</p>
     <ul class="text-sm text-emerald-900 space-y-1" aria-label="Daftar periksa data Acesio">${items}</ul>
-    <p class="text-xs ${l.acesioStatus === 'failed' ? 'text-red-700' : 'text-emerald-800'} font-medium" role="status">${esc(status)}</p>
+    ${bookingBox}
+    <p class="text-xs ${l.acesioStatus === 'failed' || l.acesioDecision === 'rejected' ? 'text-red-700' : 'text-emerald-800'} font-medium" role="status">${esc(status)}</p>
+    ${rd.eligible && l.acesioStatus !== 'sent' ? '<p class="text-xs text-emerald-800">Saat tahap diubah ke Won, data otomatis diajukan ke Acesio. Tombol di bawah untuk mencoba manual bila gagal.</p>' : ''}
     <div class="flex flex-wrap items-center gap-3">
       <button type="button" data-a="send-acesio" class="${BTN} bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-40" ${rd.ready ? '' : 'disabled'} ${hint ? 'aria-describedby="acesio-hint"' : ''}>Ajukan ke Acesio</button>
       ${hint ? `<span id="acesio-hint" class="text-xs text-emerald-800">${esc(hint)}</span>` : ''}
@@ -600,6 +613,13 @@ async function openEdit(id, trigger) {
     if (fd.hotStage) body.hotStage = fd.hotStage;
     if (String(fd.referensi ?? '').trim() !== String(l.referensi || '')) body.referensi = String(fd.referensi ?? '').trim().slice(0, 50);
     if (fd.resetAuto) body.resetAuto = true;
+    if ('booking_day' in fd) {
+      const old = l.data || {}, bk = {};
+      if (String(fd.booking_day || '') !== String(old.booking_day || '')) bk.day = fd.booking_day || '';
+      if (String(fd.booking_time || '') !== String(old.booking_time || '')) bk.time = fd.booking_time || '';
+      if (String(fd.booking_services || '').trim() !== String(old.booking_services || '')) bk.services = String(fd.booking_services || '').trim();
+      if (Object.keys(bk).length) body.booking = bk;
+    }
     await send('/api/leads/' + encodeURIComponent(id), body, 'PATCH');
     const date = $('#fu-date').value || null, note = $('#fu-note').value.trim();
     if (date !== (l.followUpDate || null) || note !== (l.followUpNote || '')) await send(`/api/leads/${encodeURIComponent(id)}/followup`, { date, note }, 'PUT');
