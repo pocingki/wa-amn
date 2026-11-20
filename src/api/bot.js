@@ -3,9 +3,10 @@ import * as C from '../conversations.js';
 import * as leadStore from '../store.js';
 import * as bot from '../bot.js';
 import { emit } from '../events.js';
+import * as settingsStore from '../settings.js';
 
-const CONV = /^\/api\/conversations\/(\d+)(?:\/(read|mode|send|delete-messages|resend|attention\/clear))?$/;
-const METHODS = { '': ['GET', 'DELETE'], read: ['POST'], mode: ['POST'], send: ['POST'], 'delete-messages': ['POST'], resend: ['POST'], 'attention/clear': ['POST'] };
+const CONV = /^\/api\/conversations\/(\d+)(?:\/(read|mode|send|delete-messages|resend|attention\/clear|dp))?$/;
+const METHODS = { '': ['GET', 'DELETE'], read: ['POST'], mode: ['POST'], send: ['POST'], 'delete-messages': ['POST'], resend: ['POST'], 'attention/clear': ['POST'], dp: ['POST'] };
 const TESTER_ACTS = ['send', 'phone-reply', 'reset', 'mode', 'advance', 'transaction-done'];
 const KINDS = ['text', 'image', 'audio', 'video', 'sticker', 'document', 'location', 'contact'];
 const BAD_PHONE = 'Nomor uji tidak valid (8-15 digit)';
@@ -91,6 +92,44 @@ export async function handle(req, res, url, ctx) {
       C.save();
       ctx.audit('conversation.send', { phone: conv.phone });
       return ok({ message });
+    }
+    if (act === 'dp') { // keputusan admin atas bukti pembayaran DP: sudah masuk (-> Won -> ajukan ke Acesio) atau belum masuk
+      if (conv.form?.dpState !== 'proof') return fail(409, 'Tidak ada bukti pembayaran yang menunggu keputusan');
+      const lead = leadStore.findByPhone(conv.phone) || (conv.lid && leadStore.findByLid?.(conv.lid));
+      if (!lead) return fail(409, 'Lead untuk percakapan ini tidak ditemukan');
+      if (b.action === 'paid') {
+        if (lead.hotStage === 'Lost') return fail(409, 'Lead sudah berstatus Lost');
+        conv.form.dpState = 'paid';
+        conv.form.paidAt = Date.now();
+        clearAttention(conv);
+        C.addMessage(conv, 'system', `${ctx.user.name} memastikan DP sudah masuk. Data booking diajukan ke Acesio.`);
+        leadStore.update(lead.id, { status: 'Hot Leads', hotStage: 'Won' });
+        C.save();
+        ctx.audit('conversation.dp', { phone: conv.phone, action: 'paid' });
+        let acesio = 'manual';
+        try {
+          const r = await (await import('./crm.js')).autoSubmitLead(lead.id, ctx.audit);
+          acesio = r === null ? 'manual' : r.status === 200 ? 'sent' : 'failed';
+        } catch { acesio = 'failed'; }
+        return ok({ acesio });
+      }
+      if (b.action === 'not_received') {
+        const A = (await import('../crm-agent.js')).agentCfg(settingsStore.get());
+        const text = (await import('../bot-plan.js')).fill(A.dpNotReceivedMessage, conv, settingsStore.get());
+        let r;
+        try { r = await (await getSend(ctx))(conv.jid, text); } catch (e) { return fail(502, 'Pesan ke customer gagal terkirim: ' + (e?.message || 'galat')); }
+        const message = C.addMessage(conv, 'admin', text);
+        Object.assign(message, { type: 'text', sender: ctx.user.name, status: 'sent', waId: r?.waId });
+        conv.adminLastAt = message.ts;
+        conv.form.dpState = 'awaiting'; // bot memegang chat lagi dan menunggu bukti bayar yang benar
+        conv.mode = 'bot';
+        conv.botStartedAt = Date.now();
+        clearAttention(conv);
+        C.save();
+        ctx.audit('conversation.dp', { phone: conv.phone, action: 'not_received' });
+        return ok();
+      }
+      return fail(400, "action harus 'paid' atau 'not_received'");
     }
     if (act === 'resend') {
       if (!b.messageId) return fail(400, 'messageId wajib');

@@ -12,6 +12,7 @@ import { cssFor, paletteFrom } from '../public/assets/js/brand-color.js';
 export const KINDS = {
   logo: { max: 1024 * 1024, types: ['png', 'jpeg', 'webp'] },
   favicon: { max: 256 * 1024, types: ['png', 'ico'] },
+  qris: { max: 2 * 1024 * 1024, types: ['png', 'jpeg', 'webp'] }, // gambar QRIS pembayaran DP; TIDAK dilayani di rute publik
 };
 const MIME = { png: 'image/png', jpeg: 'image/jpeg', webp: 'image/webp', ico: 'image/x-icon' };
 const EXT = { png: 'png', jpeg: 'jpg', webp: 'webp', ico: 'ico' };
@@ -86,7 +87,8 @@ export function status() {
     palette: paletteFrom(S.brandColor),
     logo: info(readAsset('logo')),
     favicon: info(readAsset('favicon')),
-    limits: { logoKB: KINDS.logo.max / 1024, faviconKB: KINDS.favicon.max / 1024 },
+    qris: info(readAsset('qris')),
+    limits: { logoKB: KINDS.logo.max / 1024, faviconKB: KINDS.favicon.max / 1024, qrisKB: KINDS.qris.max / 1024 },
   };
 }
 

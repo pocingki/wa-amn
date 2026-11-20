@@ -57,7 +57,8 @@ test('booking: jam penuh ditolak dengan alternatif, jam tersedia diterima dan ma
   assert.equal(r.conv.mode, 'bot');
   assert.match(t.sent.at(-1), /sudah penuh.*10:00, 11:00/s);
   r = await processIncoming(M('10:00'), t.d);
-  assert.equal(r.conv.mode, 'admin');
+  assert.equal(r.conv.form.stage, 'done');
+  assert.equal(r.conv.form.dpState, 'awaiting');
   assert.equal(t.leads[0].data.booking_day, '2023-11-20');
   assert.equal(t.leads[0].data.booking_time, '10:00');
   assert.equal(t.leads[0].data.booking_services, 'Fisioterapi');
@@ -67,6 +68,24 @@ test('booking: Acesio tidak terjangkau -> diterima, ditandai perlu dicek admin',
   const t = mk(async () => null);
   await processIncoming(M('mau booking'), t.d);
   const r = await processIncoming(M('Layanan: Fisioterapi\nTanggal booking: 20/11/2023\nJam booking: 09:00'), t.d);
-  assert.equal(r.conv.mode, 'admin');
+  assert.equal(r.conv.form.stage, 'done');
   assert.match(r.conv.attentionReason, /belum diverifikasi/);
+});
+
+test('DP: info rekening + gambar QRIS terkirim; QRIS tidak bisa dikirim (Convia/Meta) -> admin diminta kirim manual', async () => {
+  const run = async (sendQris) => {
+    const t = mk(slots);
+    t.d.settings = { get: () => ({ ...S, crmAgent: { ...S.crmAgent, askBooking: false, bankAccounts: 'BCA 123 a.n. Klinik', dpAmount: 'Rp 100.000' } }) };
+    t.d.qris = () => true; t.d.sendQris = sendQris;
+    await processIncoming(M('mau booking'), t.d);
+    return t;
+  };
+  let sentImg = 0;
+  const ok = await run(async () => { sentImg++; return { waId: 'q' }; });
+  assert.equal(sentImg, 1);
+  assert.match(ok.sent.at(-1), /Rp 100\.000/); assert.match(ok.sent.at(-1), /BCA 123/);
+  assert.ok(!ok.d.convs.get('6281').needsAttention, String(ok.d.convs.get('6281').attentionReason));
+  const bad = await run(async () => { const e = new Error('x'); e.code = 'NOT_SUPPORTED'; throw e; });
+  assert.equal(bad.d.convs.get('6281').needsAttention, true);
+  assert.match(bad.d.convs.get('6281').attentionReason, /QRIS/);
 });

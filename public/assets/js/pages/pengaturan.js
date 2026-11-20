@@ -71,16 +71,20 @@ export function buildSettingsPatch(v, cur = {}) {
   }
   if ('crmAgentForm' in v) { // tab Agen CRM
     const clip = (k, max) => String(v[k] ?? '').trim().slice(0, max);
-    const delays = [];
-    for (const [i, k] of ['crmDelay1', 'crmDelay2'].entries()) {
-      const n = Number(String(v[k] ?? '').trim());
-      if (!Number.isInteger(n) || n < 5 || n > 10080) errors.push({ field: k, msg: `Jeda follow up ke-${i + 1} harus bilangan bulat 5-10080 menit.` });
-      else delays.push(n);
-    }
+    const delay = Number(String(v.crmDelay1 ?? '').trim());
+    if (!Number.isInteger(delay) || delay < 5 || delay > 10080) errors.push({ field: 'crmDelay1', msg: 'Jeda follow up DP harus bilangan bulat 5-10080 menit.' });
+    const hhmm = (k, label) => {
+      const t = String(v[k] ?? '').trim();
+      if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(t)) { errors.push({ field: k, msg: `${label} harus berformat JJ:MM, contoh 09:00.` }); return ''; }
+      return t;
+    };
     p.crmAgent = {
-      enabled: v.crmEnabled === 'on', askBooking: v.crmAskBooking === 'on', autoSubmit: v.crmAutoSubmit === 'on',
-      formIntro: clip('crmFormIntro', 1000), doneMessage: clip('crmDoneMessage', 1000),
-      followUpDelaysMinutes: delays, followUpMessages: [clip('crmFollow1', 1000), clip('crmFollow2', 1000)],
+      enabled: v.crmEnabled === 'on', askBooking: v.crmAskBooking === 'on', autoSubmit: v.crmAutoSubmit === 'on', remindersEnabled: v.crmReminders === 'on',
+      formIntro: clip('crmFormIntro', 1000), dpMessage: clip('crmDpMessage', 1000), proofMessage: clip('crmProofMessage', 1000), dpNotReceivedMessage: clip('crmDpNotReceived', 1000),
+      dpAmount: clip('crmDpAmount', 60), bankAccounts: clip('crmBank', 600),
+      followUpDelaysMinutes: [delay], followUpMessages: [clip('crmFollow1', 1000)],
+      reminderH1Time: hhmm('crmH1Time', 'Jam pengingat H-1'), reminderH0Time: hhmm('crmH0Time', 'Jam pengingat hari H'),
+      reminderH1Message: clip('crmH1Message', 1000), reminderH0Message: clip('crmH0Message', 1000),
     };
   }
   return { patch: p, errors };
@@ -272,7 +276,7 @@ function paletteStrip(c) {
 }
 
 /** Logo dan favicon: diunggah langsung (tidak lewat tombol Simpan). */
-function assetRows(BI, dis) {
+function assetRows(BI, dis, kinds = ['logo', 'favicon']) {
   const kb = (n) => (n >= 1024 ? `${+(n / 1024).toFixed(1)} MB` : `${n} KB`);
   const lim = BI?.limits || { logoKB: 1024, faviconKB: 256 };
   const row = (kind, label, hint, accept, info, preview) => `<div class="flex items-center gap-3 flex-wrap">
@@ -285,6 +289,12 @@ function assetRows(BI, dis) {
     ? `<img src="/brand/logo?v=${BI.logo.updatedAt}" alt="Logo saat ini" class="h-12 max-w-[9rem] object-contain ${box}">`
     : `<div class="h-12 w-20 flex items-center justify-center text-xs text-gray-500 ${box}">Belum ada</div>`;
   const icoPrev = `<img src="/brand/favicon?v=${BI?.favicon?.updatedAt || 0}" alt="Favicon saat ini" class="h-10 w-10 object-contain ${box}">`;
+  if (kinds.includes('qris')) {
+    const qPrev = BI?.qris
+      ? `<img src="/api/brand/qris?v=${BI.qris.updatedAt}" alt="QRIS saat ini" class="h-20 w-20 object-contain ${box}">`
+      : `<div class="h-20 w-20 flex items-center justify-center text-xs text-gray-500 ${box}">Belum ada</div>`;
+    return row('qris', 'Gambar QRIS', `PNG, JPG, atau WebP, maks ${kb(lim.qrisKB ?? 2048)}. Dikirim ke customer bersama info DP.`, 'image/png,image/jpeg,image/webp', BI?.qris, qPrev);
+  }
   return row('logo', 'Logo', `PNG, JPG, atau WebP, maks ${kb(lim.logoKB)}. Latar transparan lebih baik. Tampil di header dan halaman login.`, 'image/png,image/jpeg,image/webp', BI?.logo, logoPrev)
     + row('favicon', 'Favicon (ikon tab browser)', `PNG persegi (64x64 atau lebih) atau ICO, maks ${kb(lim.faviconKB)}.`, 'image/png,.ico,image/x-icon', BI?.favicon, icoPrev);
 }
@@ -305,12 +315,17 @@ function bindBrand() {
     txt.oninput = () => sync(false);
     $('#b-color-reset').onclick = () => { txt.value = ''; pick.value = DEFAULT_PALETTE[800]; sync(true); };
   }
-  const box = $('#b-assets');
-  if (!box || !canEdit) return;
+  if (!canEdit) return;
+  for (const [sel, kinds] of [['#b-assets', undefined], ['#q-assets', ['qris']]]) bindAssetBox($(sel), kinds);
+}
+
+const ASSET_LABEL = { logo: 'Logo', favicon: 'Favicon', qris: 'Gambar QRIS' };
+function bindAssetBox(box, kinds) {
+  if (!box) return;
   const run = async (fn, okMsg) => {
     try {
       brandInfo = await fn();
-      box.innerHTML = assetRows(brandInfo, false);
+      box.innerHTML = assetRows(brandInfo, false, kinds);
       window.dispatchEvent(new Event('brand-changed'));
       toast(okMsg);
     } catch (err) { toast(err.message, true); }
@@ -320,8 +335,8 @@ function bindBrand() {
     if (!b) return;
     if (b.dataset.up) box.querySelector(`[data-file="${b.dataset.up}"]`)?.click();
     else if (b.dataset.del) {
-      const label = b.dataset.del === 'logo' ? 'logo' : 'favicon';
-      if (!(await confirmDialog(`Hapus ${label}?`, `Tampilan kembali ke ${label === 'logo' ? 'ikon bawaan' : 'favicon bawaan'}.`, { okText: 'Hapus', danger: true }))) return;
+      const label = ASSET_LABEL[b.dataset.del].toLowerCase();
+      if (!(await confirmDialog(`Hapus ${label}?`, b.dataset.del === 'qris' ? 'Bot tidak lagi mengirim gambar QRIS.' : `Tampilan kembali ke ${label === 'logo' ? 'ikon bawaan' : 'favicon bawaan'}.`, { okText: 'Hapus', danger: true }))) return;
       await run(() => api(`/api/brand/${b.dataset.del}`, { method: 'DELETE' }), `${label} dihapus`);
     }
   };
@@ -331,9 +346,9 @@ function bindBrand() {
     const f = input.files?.[0];
     if (!kind || !f) return;
     input.value = '';
-    const maxKB = kind === 'logo' ? (brandInfo?.limits?.logoKB ?? 1024) : (brandInfo?.limits?.faviconKB ?? 256);
+    const maxKB = brandInfo?.limits?.[`${kind}KB`] ?? { logo: 1024, favicon: 256, qris: 2048 }[kind];
     if (f.size > maxKB * 1024) { toast(`Berkas terlalu besar (maks ${maxKB} KB).`, true); return; }
-    await run(() => api(`/api/brand/${kind}`, { method: 'POST', headers: { 'Content-Type': f.type || 'application/octet-stream' }, body: f }), `${kind === 'logo' ? 'Logo' : 'Favicon'} diperbarui`);
+    await run(() => api(`/api/brand/${kind}`, { method: 'POST', headers: { 'Content-Type': f.type || 'application/octet-stream' }, body: f }), `${ASSET_LABEL[kind]} diperbarui`);
   };
 }
 
@@ -371,7 +386,7 @@ function bindTabs() {
 function render() {
   const S = getSettings(), N = S.notify || {};
   const A = { ...AI_DEFAULTS, ...(S.ai && typeof S.ai === 'object' ? S.ai : {}) };
-  const A_CRM = { enabled: false, askBooking: true, autoSubmit: true, formIntro: '', doneMessage: '', followUpDelaysMinutes: [180, 1440], followUpMessages: ['', ''], ...(S.crmAgent && typeof S.crmAgent === 'object' ? S.crmAgent : {}) };
+  const A_CRM = { enabled: false, askBooking: true, autoSubmit: true, formIntro: '', dpMessage: '', proofMessage: '', dpNotReceivedMessage: '', dpAmount: '', bankAccounts: '', followUpDelaysMinutes: [180], followUpMessages: [''], remindersEnabled: true, reminderH1Time: '09:00', reminderH0Time: '07:00', reminderH1Message: '', reminderH0Message: '', ...(S.crmAgent && typeof S.crmAgent === 'object' ? S.crmAgent : {}) };
   const dis = canEdit ? '' : 'disabled';
   const phoneFmt = PHONE_FORMATS.includes(S.phoneFormat) ? S.phoneFormat : 'digits';
   const num = (name, label, hint, min, max) => field(label, `<input name="${name}" type="number" min="${min}" max="${max}" step="1" class="${INP}" value="${esc(S[name] ?? N[name] ?? '')}" ${dis}>`, hint);
@@ -462,13 +477,28 @@ function render() {
       ${chk('crmAskBooking', A_CRM.askBooking, 'Tanyakan booking di formulir', 'Customer diminta mengisi layanan, tanggal, dan jam. Jam dicek ke jadwal Acesio; yang penuh ditolak dengan usulan jam lain. Admin masih bisa mengoreksi di detail lead.', dis)}
       ${chk('crmAutoSubmit', A_CRM.autoSubmit, 'Ajukan otomatis ke Acesio saat DP lunas', 'Saat admin mengubah tahap lead menjadi Won, data langsung diajukan ke Acesio. Bila gagal, percakapan ditandai perlu perhatian dan dicoba ulang otomatis. Tombol Ajukan manual tetap ada.', dis)}
       ${field('Pengantar formulir', `<textarea name="crmFormIntro" rows="2" class="${INP}" maxlength="1000" ${dis}>${esc(A_CRM.formIntro)}</textarea>`, 'Teks di atas daftar kolom yang dikirim ke customer')}
-      ${field('Pesan setelah formulir lengkap', `<textarea name="crmDoneMessage" rows="2" class="${INP}" maxlength="1000" ${dis}>${esc(A_CRM.doneMessage)}</textarea>`, 'Dikirim saat chat dialihkan ke admin. {admin} = nama admin')}
-      <fieldset class="space-y-4 border-t border-gray-100 pt-4"><legend class="font-semibold text-brand-800 mb-2">Follow up DP (maksimal 2 kali)</legend>
-        <p class="text-xs text-gray-600">Dikirim bila formulir sudah lengkap tetapi tahap Hot Lead belum Won. Berhenti otomatis bila DP lunas (Won), Lost, atau customer membalas. Di Convia, pesan hanya dikirim dalam 24 jam sejak pesan terakhir customer; di luar itu chat ditandai perlu perhatian.</p>
-        ${field('Follow up 1: berapa menit setelah formulir lengkap', `<input name="crmDelay1" type="number" min="5" max="10080" class="${INP}" value="${esc(A_CRM.followUpDelaysMinutes[0])}" ${dis}>`)}
-        ${field('Isi follow up 1', `<textarea name="crmFollow1" rows="2" class="${INP}" maxlength="1000" ${dis}>${esc(A_CRM.followUpMessages[0])}</textarea>`, '{nama} = nama customer')}
-        ${field('Follow up 2: berapa menit setelah formulir lengkap', `<input name="crmDelay2" type="number" min="5" max="10080" class="${INP}" value="${esc(A_CRM.followUpDelaysMinutes[1])}" ${dis}>`)}
-        ${field('Isi follow up 2', `<textarea name="crmFollow2" rows="2" class="${INP}" maxlength="1000" ${dis}>${esc(A_CRM.followUpMessages[1])}</textarea>`)}
+      <fieldset class="space-y-4 border-t border-gray-100 pt-4"><legend class="font-semibold text-brand-800 mb-2">Pembayaran DP</legend>
+        <p class="text-xs text-gray-600">Setelah formulir (termasuk booking) lengkap, bot mengirim info DP ini dan tetap memegang chat. Begitu customer mengirim bukti bayar (gambar atau dokumen), chat dialihkan ke admin dan ditandai perlu perhatian. Admin mengecek mutasi rekening lalu menekan "Sudah masuk" (data booking otomatis diajukan ke Acesio) atau "Belum masuk" (customer diberi tahu).</p>
+        ${field('Nominal DP', `<input name="crmDpAmount" class="${INP}" maxlength="60" placeholder="Contoh: Rp 100.000" value="${esc(A_CRM.dpAmount)}" ${dis}>`, 'Kosongkan bila nominal tidak ingin disebut')}
+        ${field('Nomor rekening', `<textarea name="crmBank" rows="3" class="${INP}" maxlength="600" placeholder="BCA 1234567890 a.n. Nama Klinik" ${dis}>${esc(A_CRM.bankAccounts)}</textarea>`, 'Satu rekening per baris')}
+        <div id="q-assets" class="space-y-3">${assetRows(brandInfo, !canEdit, ['qris'])}</div>
+        ${field('Pesan info DP', `<textarea name="crmDpMessage" rows="4" class="${INP}" maxlength="1000" ${dis}>${esc(A_CRM.dpMessage)}</textarea>`, '{nominal} = nominal DP, {rekening} = daftar rekening, {nama} = nama customer. Gambar QRIS dikirim otomatis di bawah pesan ini (jalur Baileys).')}
+        ${field('Pesan bila DP belum masuk', `<textarea name="crmDpNotReceived" rows="2" class="${INP}" maxlength="1000" ${dis}>${esc(A_CRM.dpNotReceivedMessage)}</textarea>`, 'Dikirim ke customer saat admin menekan "Belum masuk"; bot kembali memegang chat')}
+        ${field('Pesan saat bukti bayar diterima', `<textarea name="crmProofMessage" rows="2" class="${INP}" maxlength="1000" ${dis}>${esc(A_CRM.proofMessage)}</textarea>`, '{admin} = nama admin')}
+      </fieldset>
+      <fieldset class="space-y-4 border-t border-gray-100 pt-4"><legend class="font-semibold text-brand-800 mb-2">Follow up DP (satu kali)</legend>
+        <p class="text-xs text-gray-600">Dikirim satu kali bila DP belum masuk. Berhenti otomatis bila bukti bayar diterima, tahap Won atau Lost. Di Convia, pesan hanya dikirim dalam 24 jam sejak pesan terakhir customer; di luar itu admin ditandai perlu perhatian.</p>
+        ${field('Berapa menit setelah customer terakhir aktif', `<input name="crmDelay1" type="number" min="5" max="10080" class="${INP}" value="${esc(A_CRM.followUpDelaysMinutes[0])}" ${dis}>`)}
+        ${field('Isi follow up', `<textarea name="crmFollow1" rows="3" class="${INP}" maxlength="1000" ${dis}>${esc(A_CRM.followUpMessages[0])}</textarea>`, '{nama} = nama customer')}
+      </fieldset>
+      <fieldset class="space-y-4 border-t border-gray-100 pt-4"><legend class="font-semibold text-brand-800 mb-2">Pengingat booking (H-1 dan hari H)</legend>
+        ${chk('crmReminders', A_CRM.remindersEnabled, 'Kirim pengingat booking', 'Hanya untuk customer yang DP-nya lunas (tahap Won) dan punya data booking. Tanggal dan jam diambil dari data lead, jadi koreksi admin ikut terpakai. Tidak dikirim bila ditolak Acesio.', dis)}
+        <div class="grid grid-cols-2 gap-4">
+          ${field('Jam kirim H-1 (WIB)', `<input name="crmH1Time" type="time" class="${INP}" value="${esc(A_CRM.reminderH1Time)}" ${dis}>`)}
+          ${field('Jam kirim hari H (WIB)', `<input name="crmH0Time" type="time" class="${INP}" value="${esc(A_CRM.reminderH0Time)}" ${dis}>`)}
+        </div>
+        ${field('Isi pengingat H-1', `<textarea name="crmH1Message" rows="2" class="${INP}" maxlength="1000" ${dis}>${esc(A_CRM.reminderH1Message)}</textarea>`, '{nama} {layanan} {tanggal} {jam}')}
+        ${field('Isi pengingat hari H', `<textarea name="crmH0Message" rows="2" class="${INP}" maxlength="1000" ${dis}>${esc(A_CRM.reminderH0Message)}</textarea>`, '{nama} {layanan} {jam}')}
       </fieldset>
     </div>
     <div id="s-save" class="space-y-3 mt-6">

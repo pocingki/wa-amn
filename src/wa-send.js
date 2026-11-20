@@ -58,7 +58,7 @@ export function createSender({
     sent.set(waId, t);
   }
 
-  async function run(jid, text, enqueuedAt) {
+  async function run(jid, text, enqueuedAt, image = null) {
     if (!transport.isConnected()) throw notConnected();
     await acquire(enqueuedAt);
     if (!transport.isConnected()) throw notConnected();
@@ -72,7 +72,10 @@ export function createSender({
       }
       let res;
       try {
-        res = await transport.sendText(jid, text);
+        if (image) {
+          if (typeof transport.sendImage !== 'function') throw fail('NOT_SUPPORTED', 'Pengiriman gambar belum didukung pada koneksi ini.', false);
+          res = await transport.sendImage(jid, image, text);
+        } else res = await transport.sendText(jid, text);
       } catch (err) {
         throw fail('SEND_FAILED', 'Gagal mengirim pesan WhatsApp.', err?.retryable ?? true, err);
       }
@@ -89,6 +92,12 @@ export function createSender({
     sendText(jid, text) {
       const enq = now();
       const p = tail.then(() => run(jid, text, enq));
+      tail = p.catch(() => {});
+      return p;
+    },
+    sendImage(jid, buffer, caption = '') {
+      const enq = now();
+      const p = tail.then(() => run(jid, caption, enq, buffer));
       tail = p.catch(() => {});
       return p;
     },

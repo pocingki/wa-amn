@@ -6,6 +6,8 @@ import * as settingsStore from './settings.js';
 import { ingest } from './leads.js';
 import { emit } from './events.js';
 import { plan, setMode, applyReplyEffect, fill } from './bot-plan.js';
+import fs from 'node:fs';
+import * as brandMod from './brand.js';
 import { agentCfg, shouldStart, begin as beginForm, step as formStep, checkSlots } from './crm-agent.js';
 
 const BACKOFF = [1000, 3000, 9000]; // jeda antar percobaan kirim
@@ -84,6 +86,12 @@ export function makeRealDeps(send) {
     plan,
     ai,
     quota,
+    qris: () => !!brandMod.readAsset('qris'),
+    sendQris: async (jid) => {
+      const a = brandMod.readAsset('qris');
+      if (!a) throw new Error('QRIS belum diunggah');
+      return (await import('./whatsapp.js')).sendImage(jid, fs.readFileSync(a.file), '');
+    },
     acesioForm: async (phone) => (await import('./acesio-form.js')).fetchForm(phone),
     acesioServices: async () => (await import('./acesio-booking.js')).fetchServices(),
     acesioSlots: async (day) => (await import('./acesio-booking.js')).fetchSlots(day),
@@ -310,11 +318,11 @@ export async function processIncoming(msg, d) {
       const lead0 = findLead(d, msg.phone, msg.lid) || res?.lead || null;
       if (shouldStart(conv, lead0, S)) await beginForm(d, conv, lead0, now);
       const slots = await checkSlots(d, { conv, msg, now });
-      const x = formStep({ conv, msg, S, now, slots });
+      const x = formStep({ conv, msg, S, now, slots, qris: !!d.qris?.() });
       if (x.consumed) {
         agentX = x;
         p = { ...p, replies: x.replies, attention: null, referensi: x.referensi || p.referensi };
-      } else if (conv.form?.stage === 'collecting') {
+      } else if (conv.form?.stage === 'collecting' || (conv.form?.stage === 'done' && conv.form?.dpState === 'awaiting')) {
         p = { ...p, replies: [...p.replies.filter((r) => !['question', 'reask', 'completion'].includes(r.kind)), ...(x.append ? x.replies : [])] };
       }
     } catch (e) {
@@ -369,6 +377,18 @@ export async function processIncoming(msg, d) {
       const l = findLead(d, msg.phone, msg.lid);
       if (l) d.leads.update(l.id, { lastReplyAt: d.now() });
       replies.push(m);
+      if (r.image === 'qris' && d.sendQris) {
+        try {
+          const q = await d.sendQris(conv.jid);
+          const qm = d.convs.addMessage(conv, 'bot', '[Gambar QRIS pembayaran DP]', d.now());
+          Object.assign(qm, { type: 'text', status: 'sent', waId: q?.waId, replyKind: 'dp_qris' });
+          if (q?.waId) waIdToKey.set(q.waId, key);
+        } catch {
+          // Convia/Meta (belum mendukung gambar) atau gagal kirim: admin diminta mengirim QRIS manual.
+          attention = { reason: 'Gambar QRIS tidak terkirim otomatis. Kirim QRIS secara manual ke customer' };
+          setAttention(d, conv, attention.reason, now);
+        }
+      }
     } catch {
       if (ai?.kind === 'ai' && !sentOk) {
         delete message.aiText; // kuota dilepas, teks tidak dianggap terpakai

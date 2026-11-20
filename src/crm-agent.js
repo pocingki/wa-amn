@@ -9,15 +9,34 @@ export const AGENT_DEFAULTS = {
   askBooking: true, // tanyakan layanan, tanggal, dan jam booking di formulir
   autoSubmit: true, // saat DP ditandai lunas (Won), data otomatis diajukan ke Acesio
   formIntro: 'Agar booking Anda bisa kami proses, mohon lengkapi data berikut. Salin lalu isi di sebelah titik dua:',
-  doneMessage: 'Terima kasih, data Anda sudah lengkap. {admin} akan melanjutkan untuk pembayaran DP.',
-  followUpDelaysMinutes: [180, 1440],
+  // Setelah formulir lengkap: bot mengirim info DP dan tetap memegang chat sampai customer mengirim bukti bayar.
+  dpAmount: '', // nominal DP, mis. "Rp 100.000" (kosong = tidak disebut)
+  bankAccounts: '', // satu rekening per baris, mis. "BCA 1234567890 a.n. Klinik"
+  dpMessage: 'Terima kasih, data Anda sudah lengkap. Untuk mengamankan jadwal Anda, silakan bayar DP{nominal}.\n{rekening}\nSetelah membayar, kirim bukti pembayaran di chat ini ya.',
+  proofMessage: 'Terima kasih, bukti pembayaran sudah kami terima. {admin} akan memverifikasi dan mengonfirmasi booking Anda.',
+  dpNotReceivedMessage: 'Mohon maaf, pembayaran DP Anda belum kami terima. Mohon periksa kembali dan kirim ulang bukti pembayaran yang jelas, atau kabari kami bila ada kendala.',
+  followUpDelaysMinutes: [180], // follow up DP: satu kali
   followUpMessages: [
-    'Halo {nama}, data Anda sudah kami terima. Bila ingin melanjutkan booking, silakan lakukan pembayaran DP. Kabari kami jika ada kendala.',
-    'Halo {nama}, kami ingatkan kembali untuk pembayaran DP booking Anda. Jika masih ragu atau ada pertanyaan, silakan balas pesan ini.',
+    'Halo {nama}, kami belum menerima pembayaran DP untuk booking Anda. Bila ingin melanjutkan, silakan transfer DP dan kirim bukti pembayarannya di sini. Kabari kami jika ada kendala.',
   ],
+  remindersEnabled: true, // pengingat booking untuk customer yang DP-nya lunas
+  reminderH1Time: '09:00', // jam kirim pengingat H-1 (WIB)
+  reminderH0Time: '07:00', // jam kirim pengingat hari H (WIB)
+  reminderH1Message: 'Halo {nama}, kami ingatkan booking {layanan} Anda besok, {tanggal} pukul {jam}. Sampai bertemu!',
+  reminderH0Message: 'Halo {nama}, hari ini jadwal booking {layanan} Anda pukul {jam}. Kami tunggu kedatangan Anda.',
 };
 
 export const agentCfg = (S) => ({ ...AGENT_DEFAULTS, ...(S?.crmAgent || {}) });
+/** Teks info DP. {nominal} dan {rekening} diisi dari pengaturan; baris kosong akibat kolom kosong dirapikan. */
+export function dpText(A, conv, S) {
+  const rek = String(A.bankAccounts || '').trim();
+  const t = String(A.dpMessage || '')
+    .replace(/\{nominal\}/gi, A.dpAmount ? ` sebesar ${A.dpAmount}` : '')
+    .replace(/\{rekening\}/gi, rek ? `Transfer ke:\n${rek}` : '');
+  return fill(t, conv, S).replace(/\n{3,}/g, '\n\n').replace(/[ \t]+\n/g, '\n').trim();
+}
+
+const isProof = (msg) => msg?.kind === 'image' || msg?.kind === 'document';
 const closed = (lead) => lead && (lead.hotStage === 'Won' || lead.hotStage === 'Lost');
 
 /** Perlu memulai formulir? Hanya lead Hot yang bot-nya masih memegang kendali dan nomornya diketahui. */
@@ -69,9 +88,20 @@ const ask = (conv, text) => ({
  * Mengembalikan { consumed, replies, patch?, referensi? }.
  *  consumed = pesan ini dijawab agen (balasan rencana biasa dibuang).
  */
-export function step({ conv, msg, S, now, slots = null }) {
+export function step({ conv, msg, S, now, slots = null, qris = false }) {
   const A = agentCfg(S);
   const f = conv.form;
+  // DP: bot masih memegang chat. Bukti bayar (gambar/dokumen) -> alihkan ke admin dan minta perhatian.
+  if (f && f.stage === 'done' && f.dpState === 'awaiting' && conv.mode === 'bot' && isProof(msg)) {
+    return {
+      consumed: true,
+      replies: [{
+        text: fill(A.proofMessage, conv, S), kind: 'handover',
+        commit: (c) => { applyReplyEffect(c, 'handover', undefined, now); c.form.dpState = 'proof'; c.form.proofAt = now; },
+      }],
+      attention: 'Bukti pembayaran DP masuk. Cek mutasi rekening, lalu pilih "Sudah masuk" atau "Belum masuk"',
+    };
+  }
   if (!f || f.stage !== 'collecting' || conv.mode !== 'bot') return { consumed: false, replies: [] };
   const text = String(msg?.text || msg?.caption || '');
   // missing kosong = lengkap tetapi balasan penutup belum terkirim (gagal kirim): selesaikan sekarang.
@@ -117,15 +147,15 @@ export function step({ conv, msg, S, now, slots = null }) {
   out.patch = patch;
   out.data = data;
   out.replies.push({
-    text: fill(A.doneMessage, { ...conv, name: v.name || conv.name }, S), kind: 'handover',
+    text: dpText(A, { ...conv, name: v.name || conv.name }, S), kind: 'dp_info', image: qris ? 'qris' : null,
     commit: (c) => {
-      applyReplyEffect(c, 'handover', undefined, now);
       c.form.stage = 'done';
+      c.form.dpState = 'awaiting';
       c.form.completedAt = now;
       if (!f.existing && v.name) c.name = v.name;
       c.data = { ...(c.data || {}), ...data, ...(v.referensi ? { referensi: v.referensi } : {}) };
     },
   });
-  out.attention = f.slotUnchecked ? 'Formulir lengkap, menunggu DP. Slot booking belum diverifikasi ke Acesio, cek jadwalnya' : 'Formulir data lengkap, menunggu pembayaran DP';
+  if (f.slotUnchecked) out.attention = 'Formulir lengkap. Slot booking belum diverifikasi ke Acesio, cek jadwalnya';
   return out;
 }

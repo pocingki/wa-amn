@@ -269,13 +269,13 @@ function cleanAgent(p, base) {
   const o = { ...b };
   if ('enabled' in x) o.enabled = !!x.enabled;
   for (const k of ['askBooking', 'autoSubmit']) if (k in x) o[k] = !!x[k];
-  for (const k of ['formIntro', 'doneMessage']) if (k in x) o[k] = str(x[k], 1000) || AGENT_DEFAULTS[k];
-  if (Array.isArray(x.followUpDelaysMinutes)) {
-    o.followUpDelaysMinutes = [0, 1].map((i) => clampInt(x.followUpDelaysMinutes[i], 5, 10080, AGENT_DEFAULTS.followUpDelaysMinutes[i]));
-  }
-  if (Array.isArray(x.followUpMessages)) {
-    o.followUpMessages = [0, 1].map((i) => str(x.followUpMessages[i], 1000) || AGENT_DEFAULTS.followUpMessages[i]);
-  }
+  if ('remindersEnabled' in x) o.remindersEnabled = !!x.remindersEnabled;
+  for (const k of ['formIntro', 'dpMessage', 'proofMessage', 'dpNotReceivedMessage', 'reminderH1Message', 'reminderH0Message']) if (k in x) o[k] = str(x[k], 1000) || AGENT_DEFAULTS[k];
+  if ('dpAmount' in x) o.dpAmount = str(x.dpAmount, 60);
+  if ('bankAccounts' in x) o.bankAccounts = str(x.bankAccounts, 600);
+  for (const k of ['reminderH1Time', 'reminderH0Time']) if (k in x) o[k] = /^([01]\d|2[0-3]):[0-5]\d$/.test(String(x[k]).trim()) ? String(x[k]).trim() : AGENT_DEFAULTS[k];
+  if (Array.isArray(x.followUpDelaysMinutes)) o.followUpDelaysMinutes = [clampInt(x.followUpDelaysMinutes[0], 5, 10080, AGENT_DEFAULTS.followUpDelaysMinutes[0])];
+  if (Array.isArray(x.followUpMessages)) o.followUpMessages = [str(x.followUpMessages[0], 1000) || AGENT_DEFAULTS.followUpMessages[0]];
   return o;
 }
 

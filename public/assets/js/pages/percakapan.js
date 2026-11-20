@@ -185,11 +185,15 @@ function renderHead() {
 }
 
 function renderAlert() {
-  const key = JSON.stringify([conv.needsAttention, conv.attentionReason]);
+  const dp = conv.form?.dpState === 'proof';
+  const key = JSON.stringify([conv.needsAttention, conv.attentionReason, dp]);
   if (key === kAlert) return;
   kAlert = key;
   $('#c-alert').innerHTML = conv.needsAttention
     ? `<div class="attn-banner" role="note">${icon('alert')}<span><b>Perlu perhatian</b>${conv.attentionReason ? ': ' + esc(conv.attentionReason) : ''}</span></div>` : '';
+  if (dp) {
+    $('#c-alert').insertAdjacentHTML('beforeend', `<div class="attn-banner" role="group" aria-label="Keputusan pembayaran DP"><span><b>Pembayaran DP</b>: apakah transfer sudah masuk?</span> <button type="button" data-a="dp-paid" class="wa-hbtn">Sudah masuk</button> <button type="button" data-a="dp-not" class="wa-hbtn">Belum masuk</button></div>`);
+  }
 }
 
 function renderBody() {
@@ -235,6 +239,14 @@ async function onPane(e) {
         await loadConv();
         toast(a.dataset.a === 'takeover' ? 'Anda mengambil alih percakapan ini' : 'Percakapan dikembalikan ke bot');
         break;
+      case 'dp-paid': case 'dp-not': {
+        const paid = a.dataset.a === 'dp-paid';
+        if (!(await confirmDialog(paid ? 'DP sudah masuk?' : 'DP belum masuk?', paid ? 'Tahap lead menjadi Won dan data booking otomatis diajukan ke Acesio.' : 'Customer diberi tahu bahwa pembayaran belum diterima, lalu bot memegang chat lagi.', { okText: paid ? 'Ya, sudah masuk' : 'Ya, belum masuk' }))) return;
+        const r = await send(`/api/conversations/${phone}/dp`, { action: paid ? 'paid' : 'not_received' });
+        await loadConv();
+        toast(!paid ? 'Customer diberi tahu pembayaran belum masuk' : r?.acesio === 'sent' ? 'DP dikonfirmasi. Data booking sudah diajukan ke Acesio' : r?.acesio === 'failed' ? 'DP dikonfirmasi, tetapi pengajuan ke Acesio gagal. Dicoba ulang otomatis atau ajukan manual di CRM' : 'DP dikonfirmasi. Ajukan ke Acesio dari halaman CRM');
+        break;
+      }
       case 'to-lead': await toLead(); break;
       case 'kebab': {
         const items = [];

@@ -34,7 +34,7 @@ const S = {
   botEnabled: true, botName: 'Sari', adminName: 'Dewi', openingMessage: 'Halo', fallbackMessage: '', handoverMessage: 'Dilanjutkan Dewi',
   completionMessage: 'Terima kasih', botDurationMinutes: 0, staleMinutes: 10, fallbackCooldownMinutes: 30, autoTakeoverOnPhoneReply: true,
   slangMap: {}, intents: [], requiredFields: [],
-  crmAgent: { ...AGENT_DEFAULTS, enabled: true, askBooking: false },
+  crmAgent: { ...AGENT_DEFAULTS, enabled: true, askBooking: false, bankAccounts: 'BCA 1234567890 a.n. Klinik', dpAmount: 'Rp 100.000' },
 };
 function mk(form) {
   const st = new Map(), sent = [], leads = [{ id: 'L1', phone: '6281', name: 'Nama WA', waName: 'Nama WA', status: 'Hot Leads', hotStage: 'Follow Up', data: {} }];
@@ -69,17 +69,28 @@ test('lead Hot baru: bot kirim formulir, jawab bertahap, lengkap -> admin, nama 
   assert.equal(r.conv.mode, 'bot');
   assert.match(t.sent.at(-1), /masih kurang/i);
   assert.match(t.sent.at(-1), /Pekerjaan/);
+  r.conv.needsAttention = false; r.conv.attentionReason = null; // sisa dari langkah sebelumnya (tanpa AI di tes)
   r = await processIncoming(M('Pekerjaan: Guru\nDomisili: Bekasi\nTahu kami dari mana: Instagram'), t.d);
-  assert.equal(r.conv.mode, 'admin', 'dialihkan ke admin setelah form lengkap');
-  assert.match(t.sent.at(-1), /DP/);
+  assert.equal(r.conv.mode, 'bot', 'bot tetap memegang chat sampai bukti bayar masuk');
+  assert.match(t.sent.at(-1), /bayar DP/);
+  assert.match(t.sent.at(-1), /BCA 123/, 'rekening dari pengaturan ikut terkirim');
+  assert.equal(r.conv.form.dpState, 'awaiting');
   const lead = t.leads[0];
   assert.equal(lead.name, 'Budi Santoso');
   assert.equal(lead.waName, 'Nama WA', 'nama WA tetap tersimpan');
   assert.equal(lead.data.occupation, 'Guru'); assert.equal(lead.data.gender, 'L');
   assert.equal(lead.data.birth_date, '05/03/1990'); assert.equal(lead.data.month, 'November 2023');
   assert.equal(lead.referensi, 'Instagram');
-  assert.equal(r.conv.needsAttention, true);
+  assert.ok(!r.conv.needsAttention, 'belum perlu perhatian sebelum bukti bayar: ' + r.conv.attentionReason);
   assert.equal(r.conv.form.stage, 'done');
+  // bukti bayar (gambar) -> dialihkan ke admin + perlu perhatian
+  const proof = { ...M(''), kind: 'image', caption: '', mediaId: 'x' };
+  const r2 = await processIncoming(proof, t.d);
+  assert.equal(r2.conv.mode, 'admin');
+  assert.equal(r2.conv.needsAttention, true);
+  assert.match(r2.conv.attentionReason, /Bukti pembayaran DP/);
+  assert.match(r2.conv.attentionReason, /Sudah masuk/);
+  assert.equal(r2.conv.form.dpState, 'proof');
 });
 
 test('customer lama: hanya kolom kosong yang ditanya, nama dari Acesio dipakai', async () => {
@@ -88,7 +99,7 @@ test('customer lama: hanya kolom kosong yang ditanya, nama dari Acesio dipakai',
   const form = t.sent.find((x) => /Tanggal lahir/.test(x));
   assert.ok(form && !/Pekerjaan|Nama:|Jenis kelamin/.test(form) && !/dari mana/.test(form));
   const r = await processIncoming(M('Tanggal lahir: 1/2/1985\nDomisili: Depok'), t.d);
-  assert.equal(r.conv.mode, 'admin');
+  assert.equal(r.conv.form.stage, 'done');
   assert.equal(t.leads[0].name, 'Dewi Lama');
   assert.equal(t.leads[0].data.month, undefined, 'bulan customer lama tidak diubah');
 });
@@ -122,13 +133,20 @@ const conv = (o = {}) => ({ phone: '6281', jid: 'j', mode: 'admin', messages: [{
 const lead = (o = {}) => ({ hotStage: 'Follow Up', ...o });
 const run = (c, l, S2 = S, now = NOW) => due({ convs: [c], findLead: () => l, S: S2, now });
 
-test('follow up: jatuh tempo 3 jam, lalu 1 hari, maksimal 2', () => {
+test('follow up DP: jatuh tempo 3 jam, hanya satu kali', () => {
   assert.equal(run(conv(), lead()).length, 1);
   assert.equal(run(conv(), lead(), S, NOW - 3600_000).length, 0, 'belum waktunya');
-  const c2 = conv({ form: { stage: 'done', completedAt: NOW - 25 * 3600_000, followUpsSent: 1 }, messages: [{ by: 'customer', ts: NOW - 25 * 3600_000 - 1 }] });
-  assert.equal(run(c2, lead()).length, 1);
-  c2.form.followUpsSent = 2;
-  assert.equal(run(c2, lead()).length, 0);
+  const c2 = conv(); c2.form.followUpsSent = 1;
+  assert.equal(run(c2, lead()).length, 0, 'tidak ada follow up kedua');
+});
+
+test('follow up DP saat bot masih memegang chat: dihitung dari aktivitas customer terakhir, berhenti saat bukti bayar', () => {
+  const c = conv({ mode: 'bot', form: { stage: 'done', dpState: 'awaiting', completedAt: NOW - 5 * 3600_000, followUpsSent: 0 }, messages: [{ by: 'customer', ts: NOW - 3600_000 }] });
+  assert.equal(run(c, lead()).length, 0, 'customer baru aktif 1 jam lalu');
+  c.messages[0].ts = NOW - 4 * 3600_000;
+  assert.equal(run(c, lead()).length, 1);
+  c.form.dpState = 'proof';
+  assert.equal(run(c, lead()).length, 0);
 });
 
 test('follow up berhenti: DP lunas (Won), Lost, customer membalas, agen mati', () => {
@@ -140,7 +158,7 @@ test('follow up berhenti: DP lunas (Won), Lost, customer membalas, agen mati', (
 });
 
 test('Convia: lewat 24 jam dari pesan customer -> tidak dikirim, ditandai', () => {
-  const c = conv({ form: { stage: 'done', completedAt: NOW - 25 * 3600_000, followUpsSent: 1 }, messages: [{ by: 'customer', ts: NOW - 26 * 3600_000 }] });
+  const c = conv({ form: { stage: 'done', completedAt: NOW - 25 * 3600_000, followUpsSent: 0 }, messages: [{ by: 'customer', ts: NOW - 26 * 3600_000 }] });
   const r = run(c, lead(), { ...S, waProvider: 'convia' });
   assert.equal(r[0].blocked, 'convia_window');
   assert.equal(run(c, lead(), { ...S, waProvider: 'baileys' })[0].blocked, null);
@@ -149,10 +167,14 @@ test('Convia: lewat 24 jam dari pesan customer -> tidak dikirim, ditandai', () =
 test('Pengaturan: patch Agen CRM valid dan menolak jeda tidak masuk akal', async () => {
   const { buildSettingsPatch } = await import('../public/assets/js/pages/pengaturan.js');
   const base = { brandName: 'A', botName: 'B', adminName: 'C', retentionDays: '0', botDurationMinutes: '0', adminAutoReturnMinutes: '0', staleMinutes: '10', fallbackCooldownMinutes: '30', sendRateLimitPerMinute: '20', attentionMinutes: '30' };
-  const ok = buildSettingsPatch({ ...base, crmAgentForm: '1', crmEnabled: 'on', crmAskBooking: '', crmAutoSubmit: '', crmFormIntro: 'Isi ya', crmDoneMessage: 'Selesai', crmDelay1: '180', crmDelay2: '1440', crmFollow1: 'f1', crmFollow2: 'f2' }, {});
+  const ok = buildSettingsPatch({ ...base, crmAgentForm: '1', crmEnabled: 'on', crmAskBooking: '', crmAutoSubmit: '', crmReminders: 'on', crmFormIntro: 'Isi ya', crmDpMessage: 'Bayar {nominal}', crmProofMessage: 'Diterima', crmDpNotReceived: 'Belum masuk', crmDpAmount: 'Rp 100.000', crmBank: 'BCA 1', crmDelay1: '180', crmFollow1: 'f1', crmH1Time: '09:00', crmH0Time: '07:30', crmH1Message: 'h1', crmH0Message: 'h0' }, {});
   assert.deepEqual(ok.errors, []);
-  assert.deepEqual(ok.patch.crmAgent, { enabled: true, askBooking: false, autoSubmit: false, formIntro: 'Isi ya', doneMessage: 'Selesai', followUpDelaysMinutes: [180, 1440], followUpMessages: ['f1', 'f2'] });
-  const bad = buildSettingsPatch({ ...base, crmAgentForm: '1', crmDelay1: '1', crmDelay2: 'x' }, {});
-  assert.equal(bad.errors.filter((e) => /^crmDelay/.test(e.field)).length, 2);
+  assert.deepEqual(ok.patch.crmAgent, {
+    enabled: true, askBooking: false, autoSubmit: false, remindersEnabled: true, formIntro: 'Isi ya', dpMessage: 'Bayar {nominal}', proofMessage: 'Diterima', dpNotReceivedMessage: 'Belum masuk',
+    dpAmount: 'Rp 100.000', bankAccounts: 'BCA 1', followUpDelaysMinutes: [180], followUpMessages: ['f1'],
+    reminderH1Time: '09:00', reminderH0Time: '07:30', reminderH1Message: 'h1', reminderH0Message: 'h0',
+  });
+  const bad = buildSettingsPatch({ ...base, crmAgentForm: '1', crmDelay1: '1', crmH1Time: '9', crmH0Time: '07:00' }, {});
+  assert.equal(bad.errors.filter((e) => /^crmDelay|^crmH1Time/.test(e.field)).length, 2);
   assert.equal('crmAgent' in buildSettingsPatch(base, {}).patch, false, 'form lain tidak menyentuh agen');
 });

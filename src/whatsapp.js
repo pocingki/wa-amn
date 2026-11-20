@@ -52,6 +52,7 @@ export function createWhatsApp(deps = {}) {
     waSend.createSender({
       transport: {
         sendText: (j, t) => connection.adapter().sendText(j, t),
+        sendImage: (j, b, c) => connection.adapter().sendImage(j, b, c),
         sendPresence: (j, s) => connection.adapter().sendPresence(j, s),
         isConnected: () => connection.wa.status === 'connected',
       },
@@ -59,6 +60,7 @@ export function createWhatsApp(deps = {}) {
     });
 
   const sendText = (jid, text) => sender.sendText(jid, text);
+  const sendImage = (jid, buf, caption) => sender.sendImage(jid, buf, caption);
   const inflight = new Set(); // id yang sedang diproses; gagal tidak masuk seen supaya bisa dicoba lagi
 
   async function handleMessage(raw) {
@@ -161,6 +163,7 @@ export function createWhatsApp(deps = {}) {
     stop: () => connection.stop(),
     logout: () => connection.logout(),
     sendText,
+    sendImage,
     handleMessage,
     getAdapter,
   };
@@ -287,3 +290,9 @@ if (resolveProviderMode().mode === 'convia' && conviaConfigFromEnv().ok) {
 
 const inst = createWhatsAppFacade({ createConviaProvider: conviaFactory, conviaLoadError });
 export const { wa, start, stop, logout, sendText, handleMessage, getAdapter, handleWebhook, provider, mode } = inst;
+/** Kirim gambar: hanya jalur Baileys. Convia/Meta: belum didukung (melempar NOT_SUPPORTED). */
+export const sendImage = (jid, buf, caption) => {
+  if (typeof inst.sendImage === 'function') return inst.sendImage(jid, buf, caption);
+  const e = new Error('Pengiriman gambar belum didukung pada koneksi ini.'); e.code = 'NOT_SUPPORTED'; e.retryable = false;
+  return Promise.reject(e);
+};

@@ -1,9 +1,10 @@
 // /api/brand: ringkasan identitas brand + unggah/hapus logo dan favicon (admin saja untuk perubahan).
 // Warna diubah lewat PUT /api/settings (brandColor) supaya ikut versi dan riwayat pengaturan.
+import fs from 'node:fs';
 import * as brand from '../brand.js';
 import { HttpError } from '../auth.js';
 
-const ROUTE = /^\/api\/brand\/(logo|favicon)$/;
+const ROUTE = /^\/api\/brand\/(logo|favicon|qris)$/;
 
 export async function handle(req, res, url, ctx) {
   const p = url.pathname;
@@ -14,6 +15,15 @@ export async function handle(req, res, url, ctx) {
   const m = ROUTE.exec(p);
   if (!m) return false;
   const kind = m[1];
+
+  if (req.method === 'GET' && kind === 'qris') { // pratinjau untuk admin yang login (bukan rute publik)
+    const a = brand.readAsset('qris');
+    if (!a) { ctx.sendJSON(res, 404, { error: 'Belum ada gambar QRIS' }); return true; }
+    const body = fs.readFileSync(a.file);
+    res.writeHead(200, { 'Content-Type': a.type === 'png' ? 'image/png' : a.type === 'webp' ? 'image/webp' : 'image/jpeg', 'Content-Length': body.length, 'Cache-Control': 'private, no-cache', 'X-Content-Type-Options': 'nosniff' });
+    res.end(body);
+    return true;
+  }
 
   if (req.method === 'POST' || req.method === 'PUT') {
     if (!ctx.requireRole('admin')) return true;

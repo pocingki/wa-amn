@@ -228,6 +228,10 @@ export class BaileysAdapter {
     const res = await this.sock.sendMessage(jid, { text });
     return { waId: res?.key?.id };
   }
+  async sendImage(jid, buffer, caption = '') {
+    const res = await this.sock.sendMessage(jid, { image: buffer, ...(caption ? { caption } : {}) });
+    return { waId: res?.key?.id };
+  }
   async sendPresence(jid, state) { await this.sock.sendPresenceUpdate(state, jid); }
   async downloadMedia(raw) { return (await loadLibs()).downloadMediaMessage(raw, 'buffer', {}); }
   async lidToPhone(lid) {

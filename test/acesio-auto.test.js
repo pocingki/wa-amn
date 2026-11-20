@@ -119,3 +119,33 @@ test('klien Acesio: layanan, slot, status lewat HTTP', async () => {
   const s = await fetchStatuses(['x1']);
   assert.equal(s.x1.status, 'pending');
 });
+
+test('keputusan admin atas bukti bayar: Sudah masuk -> Won + terajukan ke Acesio; Belum masuk -> customer diberi tahu, bot kembali', async () => {
+  const C = await import('../src/conversations.js');
+  const botApi = await import('../src/api/bot.js');
+  settings.update({ crmAgent: { enabled: true, autoSubmit: true } });
+  const callDp = async (phone, action, sent) => {
+    const out = { status: 0, json: null };
+    const ctx = { sendJSON(r, c, b) { out.status = c; out.json = b; }, readBody: async () => ({ action }), user: { name: 'Rina', role: 'admin' }, audit() {}, requireRole: () => true, sendText: async (j, t) => (sent.push(t), { waId: 'w' }) };
+    await botApi.handle({ method: 'POST', headers: {} }, {}, new URL(`/api/conversations/${phone}/dp`, 'http://x'), ctx);
+    return out;
+  };
+  posted.length = 0;
+  const l = lead({ hotStage: 'Follow Up' });
+  const c = C.getOrCreate(l.phone, l.phone + '@s.whatsapp.net', 'Tes').conv;
+  const sent = [];
+  assert.equal((await callDp(l.phone, 'paid', sent)).status, 409, 'tanpa bukti bayar ditolak');
+  c.mode = 'admin'; c.form = { stage: 'done', dpState: 'proof' }; c.needsAttention = true; c.attentionReason = 'Bukti';
+  let r = await callDp(l.phone, 'not_received', sent);
+  assert.equal(r.status, 200);
+  assert.equal(sent.length, 1); assert.match(sent[0], /belum kami terima/);
+  assert.equal(c.mode, 'bot'); assert.equal(c.form.dpState, 'awaiting'); assert.equal(c.needsAttention, false);
+  assert.equal(posted.length, 0, 'belum masuk: tidak diajukan');
+  c.mode = 'admin'; c.form.dpState = 'proof';
+  r = await callDp(l.phone, 'paid', sent);
+  assert.equal(r.status, 200); assert.equal(r.json.acesio, 'sent');
+  assert.equal(store.all().find((x) => x.id === l.id).hotStage, 'Won');
+  assert.equal(posted.length, 1, 'data booking terkirim ke Acesio');
+  assert.equal(c.form.dpState, 'paid');
+  assert.equal((await callDp(l.phone, 'paid', sent)).status, 409, 'tidak bisa diputuskan dua kali');
+});

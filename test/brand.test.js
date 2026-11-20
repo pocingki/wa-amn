@@ -185,7 +185,7 @@ test('GET /api/brand: ringkasan nama, warna, palet, batas ukuran; perubahan masu
   assert.equal(b.color, '#6a1b9a');
   assert.equal(b.palette[800], '#6a1b9a');
   assert.equal(b.logo.type, 'png');
-  assert.deepEqual(b.limits, { logoKB: 1024, faviconKB: 256 });
+  assert.deepEqual(b.limits, { logoKB: 1024, faviconKB: 256, qrisKB: 2048 });
   const audit = fs.readdirSync(path.join(S.dataDir, 'audit')).map((f) => fs.readFileSync(path.join(S.dataDir, 'audit', f), 'utf8')).join('\n');
   assert.match(audit, /brand\.logo\.set/);
   assert.match(audit, /brand\.logo\.remove/);
